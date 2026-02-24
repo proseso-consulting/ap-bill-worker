@@ -26,6 +26,7 @@ This service moves the heavy AP bill OCR flow out of Google Apps Script to avoid
 - `src/state.js` - state load/save from GCS object.
 - `apps_script_thin_trigger.gs` - optional minimal Apps Script trigger.
 - `deploy_cloud_run.ps1` - build and deploy helper.
+- `cloudbuild.yaml` - Cloud Build config for CI (build + deploy to Cloud Run).
 - `create_scheduler_job.ps1` - Cloud Scheduler helper.
 
 ## Environment variables
@@ -80,6 +81,29 @@ Then create scheduler:
 ```powershell
 .\create_scheduler_job.ps1 -ProjectId "<project-id>" -Region "<region>" -WorkerUrl "https://<service-url>" -WorkerSecret "<secret>"
 ```
+
+## Redeploy on git push (GitHub + Cloud Build)
+
+1. **Connect GitHub**
+   - Open [Cloud Build → Repositories](https://console.cloud.google.com/cloud-build/repositories) (project `odoo-ocr-487104`).
+   - Select the **1st gen** tab → **Connect repository**.
+   - Source: **GitHub (Cloud Build GitHub App)** → Continue.
+   - Sign in to GitHub if needed; install **Google Cloud Build** on your account/org and choose **Only select repositories** → pick this repo → Install.
+   - Back in GCP: choose the repo, accept the disclaimer → **Connect**.
+
+2. **Create trigger**
+   - Go to [Cloud Build → Triggers](https://console.cloud.google.com/cloud-build/triggers).
+   - **Create trigger**.
+   - Name: e.g. `ap-bill-ocr-worker-deploy`.
+   - Event: **Push to a branch**; pick the repo you connected; branch `^master$` (or your main branch).
+   - Configuration: **Cloud Build configuration file**; path `cloudbuild.yaml` (leave default).
+   - (Optional) Substitution variables: `_REGION` = `asia-southeast1`, `_SERVICE_NAME` = `ap-bill-ocr-worker` (defaults are already in `cloudbuild.yaml`).
+   - **Create**.
+
+3. **IAM**
+   - Cloud Build’s service account needs to deploy to Cloud Run and push to Artifact Registry. In project **IAM**, find `PROJECT_NUMBER@cloudbuild.gserviceaccount.com` and ensure it has **Cloud Run Admin** and **Artifact Registry Writer** (or **Storage Admin** if using GCR). If you used the same project and ran `gcloud builds submit` before, this is usually already set.
+
+After this, every push to the selected branch will build the image and redeploy `ap-bill-ocr-worker` to Cloud Run in `asia-southeast1`.
 
 ## IAM and API requirements
 

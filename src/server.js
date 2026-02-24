@@ -46,10 +46,34 @@ app.get("/list-docs", async (req, res) => {
 app.post("/debug", async (req, res) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
   const { OdooClient, kwWithCompany } = require("./odoo");
-  const { loadRoutingRows } = require("./sheets");
+  const { loadRoutingSheetData, loadRoutingRows, getRoutingRowValidation } = require("./sheets");
+  const { getRoutingSummary } = require("./worker");
   try {
+    const routingSummary = await getRoutingSummary(logger);
+    const { rows: rawRows } = await loadRoutingSheetData(config);
+    const toBool = (v) => ["1", "true", "yes", "y"].includes(String(v || "").trim().toLowerCase());
+    const first25 = rawRows.slice(0, 25).map((r, i) => ({
+      index: i + 1,
+      db: String(r.target_db || "").trim(),
+      enabled: String(r.enabled || "").trim(),
+      validation: getRoutingRowValidation(r)
+    }));
+    const enabledRows = rawRows
+      .map((r, i) => ({ row: r, index: i + 1 }))
+      .filter(({ row }) => toBool(row.enabled))
+      .map(({ row, index }) => ({
+        index,
+        db: String(row.target_db || "").trim(),
+        enabled: String(row.enabled || "").trim(),
+        validation: getRoutingRowValidation(row)
+      }));
+    Object.assign(routingSummary, {
+      rawRowCount: rawRows.length,
+      rawRowsValidation: first25,
+      enabledRowsValidation: enabledRows
+    });
     const rows = await loadRoutingRows(config);
-    if (!rows.length) return res.json({ ok: false, error: "no routing rows" });
+    if (!rows.length) return res.json({ ok: false, error: "no routing rows", routingSummary });
     const row = rows[0];
     const odoo = new OdooClient({
       baseUrl: row.target_base_url,
@@ -104,7 +128,14 @@ app.post("/debug", async (req, res) => {
       } catch (e) { results[model.replace(/\./g, "_") + "_error"] = e.message; }
     }
 
-    return res.json({ ok: true, target: row.target_base_url, db: row.target_db, companyId, results });
+    return res.json({
+      ok: true,
+      routingSummary,
+      target: row.target_base_url,
+      db: row.target_db,
+      companyId,
+      results
+    });
   } catch (err) {
     return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
@@ -120,8 +151,10 @@ app.post("/run", async (req, res) => {
     logger.info("Worker run finished.", { elapsedMs: result.elapsedMs, totals: result.totals });
     return res.status(200).json(result);
   } catch (err) {
-    logger.error("Worker run failed.", { error: err?.message || String(err) });
-    return res.status(500).json({ ok: false, error: err?.message || String(err) });
+    const msg = err?.message || String(err);
+    const detail = err?.response?.data ? JSON.stringify(err.response.data) : err?.stack;
+    logger.error("Worker run failed.", { error: msg, detail });
+    return res.status(500).json({ ok: false, error: msg, detail: detail || undefined });
   } finally {
     isRunning = false;
   }
@@ -137,8 +170,10 @@ app.get("/run", async (req, res) => {
     logger.info("Worker run finished.", { elapsedMs: result.elapsedMs, totals: result.totals });
     return res.status(200).json(result);
   } catch (err) {
-    logger.error("Worker run failed.", { error: err?.message || String(err) });
-    return res.status(500).json({ ok: false, error: err?.message || String(err) });
+    const msg = err?.message || String(err);
+    const detail = err?.response?.data ? JSON.stringify(err.response.data) : err?.stack;
+    logger.error("Worker run failed.", { error: msg, detail });
+    return res.status(500).json({ ok: false, error: msg, detail: detail || undefined });
   } finally {
     isRunning = false;
   }

@@ -357,7 +357,11 @@ async function refreshRoutingAutoFields(headers, rows, logger, sourceMap = null)
       try { journalId = await resolvePurchaseJournalId(odoo, g.companyId); } catch (_) {}
 
       let apFolderId = 0;
-      try { apFolderId = await resolveApFolderId(odoo, g.companyId); } catch (_) {}
+      try {
+        const parentName = String(g.rows[0]?.ap_folder_parent ?? "").trim() || undefined;
+        const r = await resolveApFolderId(odoo, g.companyId, { parentFolderName: parentName });
+        apFolderId = r?.apFolderId ?? 0;
+      } catch (_) {}
 
       let targetIndustryVal = "";
       try {
@@ -434,7 +438,8 @@ function buildTargetKey(row) {
     normalizeOdooBaseUrl(row.target_base_url),
     row.target_db,
     String(row.target_login).toLowerCase(),
-    String(row.target_company_id)
+    String(row.target_company_id),
+    String(row.source_project_id ?? "")
   ].join("|");
 }
 
@@ -445,6 +450,7 @@ function groupRoutingRows(rows) {
     if (!groups.has(key)) {
       groups.set(key, {
         targetKey: key,
+        sourceProjectId: Number(row.source_project_id || 0) || undefined,
         targetCfg: {
           baseUrl: row.target_base_url,
           db: row.target_db,
@@ -453,6 +459,7 @@ function groupRoutingRows(rows) {
         },
         companyId: row.target_company_id,
         apFolderId: row.ap_folder_id || 0,
+        apFolderParent: row.ap_folder_parent || "",
         purchaseJournalId: row.purchase_journal_id || 0,
         vatIds: {
           goods: row.vat_purchase_tax_id_goods || 0,
@@ -466,21 +473,55 @@ function groupRoutingRows(rows) {
   return [...groups.values()];
 }
 
-async function resolveApFolderId(odoo, companyId) {
+async function resolveApFolderId(odoo, companyId, opts = {}) {
+  const parentFolderName = String(opts.parentFolderName || "").trim();
   const names = ["Accounts Payable", "Account Payables", "AP", "Vendor Bills"];
 
-  // Odoo 17+: folders are documents.document records with is_folder=true
-  for (const name of names) {
-    const folders = await odoo.searchRead(
-      "documents.document",
-      [["is_folder", "=", true], ["name", "=", name]],
-      ["id", "name", "company_id"],
-      kwWithCompany(companyId, { limit: 1 })
-    );
-    if (folders?.[0]?.id) return Number(folders[0].id);
+  // If parent specified (e.g. "Accounting"), resolve root folder with that name first
+  let parentId = null;
+  if (parentFolderName) {
+    try {
+      const parents = await odoo.searchRead(
+        "documents.document",
+        [["is_folder", "=", true], ["name", "=", parentFolderName], ["folder_id", "=", false]],
+        ["id"],
+        kwWithCompany(companyId, { limit: 1 })
+      );
+      if (parents?.[0]?.id) parentId = Number(parents[0].id);
+    } catch (_) {}
+    if (parentId === null) {
+      try {
+        const parents = await odoo.searchRead(
+          "documents.document",
+          [["name", "=", parentFolderName], ["folder_id", "=", false]],
+          ["id"],
+          kwWithCompany(companyId, { limit: 1 })
+        );
+        if (parents?.[0]?.id) parentId = Number(parents[0].id);
+      } catch (_) {}
+    }
+    if (parentId === null) throw new Error(`Could not resolve parent folder "${parentFolderName}" (root).`);
   }
 
-  // Fallback: try legacy documents.folder model (Odoo 16 and earlier)
+  const folderIdDomain = parentId != null ? [["folder_id", "=", parentId]] : [];
+
+  // Odoo 19: folders are documents.document with is_folder=true
+  try {
+    for (const name of names) {
+      const folders = await odoo.searchRead(
+        "documents.document",
+        [["is_folder", "=", true], ["name", "=", name], ...folderIdDomain],
+        ["id", "name", "company_id"],
+        kwWithCompany(companyId, { limit: 1 })
+      );
+      if (folders?.[0]?.id) return { apFolderId: Number(folders[0].id), useIsFolder: true };
+    }
+  } catch (err) {
+    const msg = String(err?.message || err);
+    if (!msg.includes("Invalid field") && !msg.includes("Unknown field") && !msg.includes("is_folder")) throw err;
+  }
+
+  // Fallback: documents.folder (if present on this instance; parent not applied for this model)
   try {
     for (const name of names) {
       const docs = await odoo.searchRead(
@@ -489,21 +530,33 @@ async function resolveApFolderId(odoo, companyId) {
         ["id", "name", "company_id"],
         kwWithCompany(companyId, { limit: 1 })
       );
-      if (docs?.[0]?.id) return Number(docs[0].id);
+      if (docs?.[0]?.id) return { apFolderId: Number(docs[0].id), useIsFolder: false };
     }
-  } catch (_err) {
-    // documents.folder doesn't exist in this Odoo version
-  }
+  } catch (_err) {}
+
+  // Fallback: documents.document by name only (no is_folder), optionally under parent
+  try {
+    for (const name of names) {
+      const docs = await odoo.searchRead(
+        "documents.document",
+        [["name", "=", name], ...folderIdDomain],
+        ["id", "name", "company_id"],
+        kwWithCompany(companyId, { limit: 1 })
+      );
+      if (docs?.[0]?.id) return { apFolderId: Number(docs[0].id), useIsFolder: false };
+    }
+  } catch (_err) {}
 
   throw new Error("Could not resolve AP folder id from default candidates.");
 }
 
-async function listCandidateDocuments(odoo, companyId, apFolderId) {
+async function listCandidateDocuments(odoo, companyId, apFolderId, useIsFolder = false) {
   const baseFields = ["id", "name", "attachment_id", "folder_id", "company_id", "create_date"];
+  const isFolderCond = useIsFolder ? [["is_folder", "=", false]] : [];
 
   const pass1Domain = [
     ["folder_id", "=", apFolderId],
-    ["is_folder", "=", false],
+    ...isFolderCond,
     ["attachment_id", "!=", false],
     ["name", "not ilike", `${config.scan.renamePrefix}%`]
   ];
@@ -519,7 +572,7 @@ async function listCandidateDocuments(odoo, companyId, apFolderId) {
 
   const pass2Domain = [
     ["folder_id", "=", apFolderId],
-    ["is_folder", "=", false],
+    ...isFolderCond,
     ["attachment_id", "!=", false],
     ["name", "ilike", `${config.scan.renamePrefix}%`]
   ];
@@ -1931,9 +1984,15 @@ async function processTargetGroup(target, startMs, logger) {
   const state = await loadState(config, target.targetKey);
 
   let apFolderId = Number(target.apFolderId || 0);
-  if (!apFolderId) apFolderId = await resolveApFolderId(odoo, target.companyId);
+  let useIsFolder = false;
+  if (!apFolderId) {
+    const parentName = String(target.apFolderParent ?? "").trim() || undefined;
+    const r = await resolveApFolderId(odoo, target.companyId, { parentFolderName: parentName });
+    apFolderId = r.apFolderId;
+    useIsFolder = r.useIsFolder;
+  }
 
-  const docs = await listCandidateDocuments(odoo, target.companyId, apFolderId);
+  const docs = await listCandidateDocuments(odoo, target.companyId, apFolderId, useIsFolder);
   const lastProcessed = Number(state.last_doc_id || 0);
   const newDocs = docs
     .filter((d) => Number(d.id) > lastProcessed)
@@ -2023,18 +2082,10 @@ async function runOne({ logger, payload = {} }) {
   if (docId) {
     docs = await odoo.searchRead(
       "documents.document",
-      [["id", "=", docId], ["is_folder", "=", false]],
+      [["id", "=", docId]],
       docFields,
       kwWithCompany(companyId, { limit: 1 })
     );
-    if (!docs?.length) {
-      docs = await odoo.searchRead(
-        "documents.document",
-        [["id", "=", docId]],
-        docFields,
-        { limit: 1 }
-      );
-    }
     if (!docs?.length) {
       try {
         docs = await odoo.searchRead(
@@ -2048,7 +2099,7 @@ async function runOne({ logger, payload = {} }) {
   } else {
     docs = await odoo.searchRead(
       "documents.document",
-      [["attachment_id", "=", attachmentId], ["is_folder", "=", false]],
+      [["attachment_id", "=", attachmentId]],
       docFields,
       kwWithCompany(companyId, { limit: 1, order: "id desc" })
     );
@@ -2128,15 +2179,22 @@ async function listApDocuments({ logger, payload = {} }) {
 
   const odoo = new OdooClient(target.targetCfg);
   let apFolderId = Number(target.apFolderId || 0);
-  if (!apFolderId) apFolderId = await resolveApFolderId(odoo, target.companyId);
+  let useIsFolder = false;
+  if (!apFolderId) {
+    const parentName = String(target.apFolderParent ?? "").trim() || undefined;
+    const r = await resolveApFolderId(odoo, target.companyId, { parentFolderName: parentName });
+    apFolderId = r.apFolderId;
+    useIsFolder = r.useIsFolder;
+  }
 
+  const docDomain = [
+    ["folder_id", "=", apFolderId],
+    ["attachment_id", "!=", false]
+  ];
+  if (useIsFolder) docDomain.push(["is_folder", "=", false]);
   const allDocs = await odoo.searchRead(
     "documents.document",
-    [
-      ["folder_id", "=", apFolderId],
-      ["is_folder", "=", false],
-      ["attachment_id", "!=", false]
-    ],
+    docDomain,
     ["id", "name", "attachment_id", "create_date"],
     kwWithCompany(target.companyId, { limit: 5000, order: "id desc" })
   );
@@ -2210,8 +2268,25 @@ async function runWorker({ logger }) {
   };
 }
 
+async function getRoutingSummary(logger) {
+  const rows = await getRoutingRows(logger);
+  const targets = groupRoutingRows(rows);
+  return {
+    routingRowCount: rows.length,
+    targetsCount: targets.length,
+    targets: targets.map((t) => ({
+      targetKey: t.targetKey,
+      baseUrl: t.targetCfg.baseUrl,
+      db: t.targetCfg.db,
+      companyId: t.companyId,
+      sourceProjectId: t.sourceProjectId
+    }))
+  };
+}
+
 module.exports = {
   runWorker,
   runOne,
-  listApDocuments
+  listApDocuments,
+  getRoutingSummary
 };

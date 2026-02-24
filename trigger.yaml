@@ -1,0 +1,10 @@
+# Cloud Build trigger config (2nd gen). Use if CLI flags fail with INVALID_ARGUMENT.
+# Create: gcloud builds triggers create github --trigger-config=trigger.yaml --region=asia-southeast1 --project=odoo-ocr-487104
+name: ap-bill-ocr-worker-deploy
+description: Deploy ap-bill-ocr-worker to Cloud Run on push
+repositoryEventConfig:
+  repository: projects/odoo-ocr-487104/locations/asia-southeast1/connections/my-github-conn/repositories/odoo-ap-worker
+  push:
+    branch: ^master$
+filename: cloudbuild.yaml
+serviceAccount: projects/odoo-ocr-487104/serviceAccounts/727082425075@cloudbuild.gserviceaccount.com

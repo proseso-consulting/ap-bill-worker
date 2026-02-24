@@ -27,15 +27,32 @@ async function readSheetValues(spreadsheetId, range) {
   return res.data.values || [];
 }
 
-function toRoutingRowStrict(row) {
+/** Returns { pass: boolean, reason?: string } for debugging why a row is rejected. */
+function getRoutingRowValidation(row) {
   const enabled = toBoolean(row.enabled);
-  if (!enabled) return null;
+  if (!enabled) return { pass: false, reason: "enabled is not true/1/yes/y" };
   const targetBaseUrl = normalizeOdooBaseUrl(row.target_base_url);
   const targetDb = String(row.target_db || "").trim();
   const targetLogin = String(row.target_login || "").trim();
   const targetPassword = String(row.target_password || "").trim();
   const targetCompanyId = toNumber(row.target_company_id, 0);
-  if (!targetBaseUrl || !targetDb || !targetLogin || !targetPassword || !targetCompanyId) return null;
+  if (!targetBaseUrl) return { pass: false, reason: "target_base_url empty" };
+  if (!targetDb) return { pass: false, reason: "target_db empty" };
+  if (!targetLogin) return { pass: false, reason: "target_login empty" };
+  if (!targetPassword) return { pass: false, reason: "target_password empty" };
+  if (!targetCompanyId) return { pass: false, reason: "target_company_id missing or zero" };
+  return { pass: true };
+}
+
+function toRoutingRowStrict(row) {
+  const { pass } = getRoutingRowValidation(row);
+  if (!pass) return null;
+  const enabled = toBoolean(row.enabled);
+  const targetBaseUrl = normalizeOdooBaseUrl(row.target_base_url);
+  const targetDb = String(row.target_db || "").trim();
+  const targetLogin = String(row.target_login || "").trim();
+  const targetPassword = String(row.target_password || "").trim();
+  const targetCompanyId = toNumber(row.target_company_id, 0);
 
   return {
     enabled,
@@ -46,6 +63,7 @@ function toRoutingRowStrict(row) {
     target_password: targetPassword,
     target_company_id: targetCompanyId,
     ap_folder_id: toNumber(row.ap_folder_id, 0),
+    ap_folder_parent: String(row.ap_folder_parent ?? "").trim() || undefined,
     purchase_journal_id: toNumber(row.purchase_journal_id, 0),
     vat_purchase_tax_id_goods: toNumber(row.vat_purchase_tax_id_goods, 0),
     vat_purchase_tax_id_services: toNumber(row.vat_purchase_tax_id_services, 0),
@@ -137,5 +155,6 @@ module.exports = {
   loadRoutingSheetData,
   saveRoutingSheetData,
   toRoutingRowStrict,
+  getRoutingRowValidation,
   loadAccountMapping
 };
