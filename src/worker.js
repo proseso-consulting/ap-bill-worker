@@ -8,7 +8,7 @@ const {
   loadAccountMapping
 } = require("./sheets");
 const { ocrTextForAttachment } = require("./vision");
-const { extractInvoiceWithGemini, assignAccountsWithGemini } = require("./gemini");
+const { extractInvoiceWithGemini, assignAccountsWithGemini, researchVendorWithGemini } = require("./gemini");
 const { m2oId, normalizeOdooBaseUrl, deriveDbFromBaseUrl, isFalsyOdooValue, sleep } = require("./utils");
 const {
   loadState,
@@ -1991,6 +1991,19 @@ async function processOneDocument(args) {
   const taxIds = pickTaxIds(vatIds, extracted);
   const taxMeta = await getTaxMeta(odoo, companyId, taxIds);
 
+  // --- Vendor research (Google Search grounding) ---
+  let vendorResearch = null;
+  try {
+    const vName = String(extracted?.vendor?.name || vendor.name || "").trim();
+    const tName = String(extracted?.vendor_details?.trade_name || "").trim();
+    vendorResearch = await researchVendorWithGemini(vName, tName, config);
+    if (vendorResearch) {
+      logger.info("Vendor research (Google Search).", { docId: doc.id, vendor: vName, research: vendorResearch });
+    }
+  } catch (err) {
+    logger.warn("Vendor research failed.", { docId: doc.id, error: err?.message || String(err) });
+  }
+
   // --- Account resolution ---
   const expenseAccounts = await loadExpenseAccounts(odoo, companyId);
   const acctLoadLog = expenseAccounts._loadLog || [];
@@ -2003,7 +2016,7 @@ async function processOneDocument(args) {
   const accountMapping = await getAccountMapping();
   let geminiAssignments = null;
   try {
-    geminiAssignments = await assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText);
+    geminiAssignments = await assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch);
     if (geminiAssignments) {
       logger.info("Gemini Pass 2 account assignments.", {
         docId: doc.id,
@@ -2141,7 +2154,11 @@ async function processOneDocument(args) {
       ? `Gemini: bill_level=${geminiAssignments.bill_level_account_code || "?"} ${geminiAssignments.bill_level_account_name || "?"}`
       : "Gemini Pass 2: null";
     const loadStatus = acctLoadLog.length ? acctLoadLog.join("; ") : "no log";
-    const acctMsg = [`<b>💡 Account suggestions</b> <i>(${expenseAccounts.length} accounts loaded)</i>`, `<i>${loadStatus}</i>`, geminiInfo, ...lines].join("<br/>");
+    const vendorResearchLine = vendorResearch ? `🔍 Vendor research: <i>${vendorResearch.slice(0, 300)}</i>` : "";
+    const acctMsgParts = [`<b>💡 Account suggestions</b> <i>(${expenseAccounts.length} accounts loaded)</i>`, `<i>${loadStatus}</i>`];
+    if (vendorResearchLine) acctMsgParts.push(vendorResearchLine);
+    acctMsgParts.push(geminiInfo, ...lines);
+    const acctMsg = acctMsgParts.join("<br/>");
     await safeMessagePost(odoo, companyId, "account.move", Number(billId), acctMsg);
   }
 

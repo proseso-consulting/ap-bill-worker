@@ -421,7 +421,7 @@ const accountAssignmentSchema = {
   required: ["assignments", "bill_level_account_id", "bill_level_account_code", "bill_level_account_name", "bill_level_confidence"]
 };
 
-async function assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText) {
+async function assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch) {
   if (!expenseAccounts?.length) return null;
 
   const lineItems = extracted?.line_items || [];
@@ -519,7 +519,12 @@ Bill-level suggested account name: ${hint.suggested_account_name || "(none)"}
 Vendor name: ${extracted?.vendor?.name || "(unknown)"}
 Vendor trade name: ${extracted?.vendor_details?.trade_name || "(same)"}
 Vendor entity type: ${extracted?.vendor_details?.entity_type || "unknown"}
-${industrySection}${feedbackSection}${ocrSection}
+${vendorResearch ? `
+VENDOR RESEARCH (from Google Search — USE THIS as your primary context for account selection):
+${vendorResearch}
+This research tells you what the vendor actually sells/does. Use it to pick the correct expense account.
+For example, if the vendor is a software company, prefer "Software & Subscriptions" or "Computer Software" over "Supplies Expenses".
+` : ""}${industrySection}${feedbackSection}${ocrSection}
 RULES (MANDATORY - follow ALL):
 
 1. YOU MUST PICK AN ACCOUNT. Returning an account_id of 0 or an ID not in the list above is NOT allowed. Always select the closest match from the available accounts.
@@ -586,7 +591,41 @@ RULES (MANDATORY - follow ALL):
   return { ...parsed, _feedbackCount: feedbackList.length };
 }
 
+async function researchVendorWithGemini(vendorName, tradeName, config) {
+  const name = String(tradeName || vendorName || "").trim();
+  if (!name || name.length < 2) return null;
+
+  const prompt = `Look up the company "${name}" using Google Search.
+Return a SHORT factual summary (max 3 sentences) covering:
+1. What the company does / what products or services it sells
+2. The industry or sector (e.g. "SaaS / developer tools", "food & beverage distribution", "office supplies retail")
+3. What expense category a purchase from this vendor would typically fall under in accounting (e.g. "Software & Subscriptions", "Meals & Entertainment", "Professional Fees", "Office Supplies", "Utilities")
+
+If the company is not well-known or search returns no useful results, say "No information found." and nothing else.`;
+
+  const body = {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    tools: [{ google_search: {} }]
+  };
+
+  try {
+    const result = await geminiWithRetryAndFallback(config, body, { throwOnFail: false });
+    if (!result) return null;
+    const data = safeJsonParse(result.text, null);
+    const text =
+      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
+      data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join(" ") ||
+      "";
+    const trimmed = text.trim();
+    if (!trimmed || trimmed.toLowerCase().startsWith("no information found")) return null;
+    return trimmed.slice(0, 500);
+  } catch (_) {
+    return null;
+  }
+}
+
 module.exports = {
   extractInvoiceWithGemini,
-  assignAccountsWithGemini
+  assignAccountsWithGemini,
+  researchVendorWithGemini
 };
