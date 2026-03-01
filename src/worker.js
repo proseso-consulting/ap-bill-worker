@@ -649,12 +649,41 @@ async function resolveApFolderId(odoo, companyId, opts = {}) {
   throw new Error("Could not resolve AP folder id from default candidates.");
 }
 
+async function resolveSubfolderIds(odoo, companyId, rootFolderId, useIsFolder) {
+  const ids = [rootFolderId];
+  if (!useIsFolder) return ids;
+  try {
+    let frontier = [rootFolderId];
+    for (let depth = 0; depth < 5 && frontier.length; depth++) {
+      const children = await odoo.searchRead(
+        "documents.document",
+        [["is_folder", "=", true], ["folder_id", "in", frontier]],
+        ["id"],
+        kwWithCompany(companyId, { limit: 200 })
+      );
+      frontier = [];
+      for (const c of children || []) {
+        const cid = Number(c.id);
+        if (!ids.includes(cid)) {
+          ids.push(cid);
+          frontier.push(cid);
+        }
+      }
+    }
+  } catch (_) {}
+  return ids;
+}
+
 async function listCandidateDocuments(odoo, companyId, apFolderId, useIsFolder = false) {
+  const folderIds = await resolveSubfolderIds(odoo, companyId, apFolderId, useIsFolder);
+  const folderCond = folderIds.length === 1
+    ? [["folder_id", "=", folderIds[0]]]
+    : [["folder_id", "in", folderIds]];
   const baseFields = ["id", "name", "attachment_id", "folder_id", "company_id", "create_date", "res_model", "res_id"];
   const isFolderCond = useIsFolder ? [["is_folder", "=", false]] : [];
 
   const pass1Domain = [
-    ["folder_id", "=", apFolderId],
+    ...folderCond,
     ...isFolderCond,
     ["attachment_id", "!=", false],
     ["name", "not ilike", `${config.scan.renamePrefix}%`]
@@ -670,7 +699,7 @@ async function listCandidateDocuments(odoo, companyId, apFolderId, useIsFolder =
   );
 
   const pass2Domain = [
-    ["folder_id", "=", apFolderId],
+    ...folderCond,
     ...isFolderCond,
     ["attachment_id", "!=", false],
     ["name", "ilike", `${config.scan.renamePrefix}%`]
@@ -2423,8 +2452,12 @@ async function listApDocuments({ logger, payload = {} }) {
     useIsFolder = r.useIsFolder;
   }
 
+  const folderIds = await resolveSubfolderIds(odoo, target.companyId, apFolderId, useIsFolder);
+  const folderCond = folderIds.length === 1
+    ? [["folder_id", "=", folderIds[0]]]
+    : [["folder_id", "in", folderIds]];
   const docDomain = [
-    ["folder_id", "=", apFolderId],
+    ...folderCond,
     ["attachment_id", "!=", false]
   ];
   if (useIsFolder) docDomain.push(["is_folder", "=", false]);
@@ -2438,6 +2471,7 @@ async function listApDocuments({ logger, payload = {} }) {
     ok: true,
     targetKey: target.targetKey,
     apFolderId,
+    subfolderIds: folderIds.length > 1 ? folderIds : undefined,
     count: allDocs.length,
     documents: allDocs.map((d) => ({
       doc_id: Number(d.id),
