@@ -650,7 +650,7 @@ async function resolveApFolderId(odoo, companyId, opts = {}) {
 }
 
 async function listCandidateDocuments(odoo, companyId, apFolderId, useIsFolder = false) {
-  const baseFields = ["id", "name", "attachment_id", "folder_id", "company_id", "create_date"];
+  const baseFields = ["id", "name", "attachment_id", "folder_id", "company_id", "create_date", "res_model", "res_id"];
   const isFolderCond = useIsFolder ? [["is_folder", "=", false]] : [];
 
   const pass1Domain = [
@@ -1826,6 +1826,22 @@ async function processOneDocument(args) {
   const attachmentId = m2oId(doc.attachment_id);
   if (!attachmentId) return { status: "skip", reason: "no_attachment" };
 
+  if (!reprocess) {
+    const linkedModel = String(doc.res_model || "").trim();
+    const linkedId = Number(doc.res_id || 0);
+    if (linkedModel === "account.move" && linkedId) {
+      const billRows = await odoo.searchRead(
+        "account.move",
+        [["id", "=", linkedId]],
+        ["id", "state"],
+        kwWithCompany(companyId, { limit: 1 })
+      );
+      if (billRows?.length) {
+        return { status: "skip", reason: "already_linked", billId: linkedId, billState: String(billRows[0].state || "") };
+      }
+    }
+  }
+
   const att = await loadAttachment(odoo, companyId, attachmentId);
   if (!att) return { status: "skip", reason: "attachment_not_found" };
 
@@ -2312,13 +2328,26 @@ async function runOne({ logger, payload = {} }) {
   }
 
   if (doc.res_model === "account.move" && doc.res_id) {
-    const billExists = await odoo.searchRead(
+    const existingBill = await odoo.searchRead(
       "account.move",
       [["id", "=", Number(doc.res_id)]],
-      ["id"],
+      ["id", "state"],
       kwWithCompany(companyId, { limit: 1 })
     );
-    if (!billExists?.length) {
+    if (existingBill?.length) {
+      const reprocess = !!(payload.reprocess || payload.force_reprocess);
+      if (!reprocess) {
+        logger.info("Document already linked to bill; skipping.", {
+          docId: doc.id, billId: doc.res_id, state: existingBill[0].state
+        });
+        return {
+          ok: true, mode: "run-one", time_start: timeStart, time_completed: new Date().toISOString(),
+          targetKey: target.targetKey,
+          doc: { id: Number(doc.id), name: String(doc.name || ""), attachment_id: m2oId(doc.attachment_id) },
+          result: { status: "skip", reason: "already_linked", billId: Number(doc.res_id), billState: String(existingBill[0].state || "") }
+        };
+      }
+    } else {
       logger.info("Clearing stale bill link from document (bill was deleted).", {
         docId: doc.id, staleBillId: doc.res_id
       });

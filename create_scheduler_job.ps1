@@ -5,7 +5,7 @@ param(
   [Parameter(Mandatory = $true)][string]$WorkerSecret,
   [string]$JobName = "ap-bill-ocr-every-5m",
   [string]$Schedule = "*/5 * * * *",
-  [string]$TimeZone = "Etc/UTC"
+  [string]$TimeZone = "Asia/Manila"
 )
 
 Write-Host "Creating/updating Cloud Scheduler job: $JobName"
