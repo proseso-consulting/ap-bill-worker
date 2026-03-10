@@ -94,10 +94,15 @@ Array of extracted line items:
 |---|---|---|
 | `description` | string | Item description |
 | `quantity` | number | Qty |
-| `unit_price` | number | Price per unit |
-| `amount` | number | Line total |
+| `unit_price` | number | Price per unit (before discount) |
+| `amount` | number | Line total (after discount) |
+| `discount_percent` | number | Discount % (0–100). 0 if none. Amount = unit_price × qty × (1 − discount_percent/100) |
 | `unit_price_includes_vat` | boolean | Whether unit price is VAT-inclusive (overridden by global `amounts_are_vat_inclusive` when true) |
-| `expense_category` | string | One of: `office_supplies`, `meals`, `repairs`, `rent`, `fuel`, `professional_fees`, `freight`, `utilities`, `inventory`, `other` |
+| `expense_category` | string | One of: `office_supplies`, `meals`, `repairs`, `rent`, `fuel`, `professional_fees`, `freight`, `utilities`, `inventory`, `equipment`, `other` |
+| `goods_or_services` | string | Per-line: `goods`, `services`, or `unknown`. Used for tax scope (goods vs services) |
+| `is_capital_goods` | boolean | true if line is capital asset/equipment (machinery, vehicles, computers, furniture, PPE) |
+| `is_imported` | boolean | true if line is clearly imported (foreign supplier, customs); false if domestic or unclear |
+| `vat_code` | string | Per-line VAT: `vatable`, `exempt`, `zero_rated`, or `no_vat` |
 
 ### expense_account_hint
 | Field | Type | Description |
@@ -129,6 +134,18 @@ Post-processing corrects Gemini misreads for handwritten/low-quality receipts:
 | H | grand_total ≈ tax_total or vat_amount (VAT picked as total) | Use vatable_base + tax, or best "total" candidate, or derive from 12% |
 | I | tax_total > 20% of grand_total (impossible for PH 12% VAT) | Use best total candidate, line sum, or derive from tax / 0.12 × 1.12 |
 
+### Discount Detection (Pass 1 prompt)
+
+- Look for "Disc.%", "Discount", or "Disc" column on the invoice.
+- Set `discount_percent` to the value (e.g. 5 for 5%). Verify: amount = unit_price × quantity × (1 − discount_percent/100).
+- `unit_price` is the **original** price before discount; `amount` is the line total after discount.
+
+### Per-Line Goods vs Services / Capital / Import (Pass 1 prompt)
+
+- **goods_or_services**: "goods" for physical products/supplies/inventory; "services" for labor, consulting, professional fees, rent, repairs, subscriptions, SaaS.
+- **is_capital_goods**: true only for long-lived assets (machinery, vehicles, computers, furniture, PPE); false for consumables.
+- **is_imported**: true when customs/import/foreign supplier is clearly indicated; false for services or domestic/unclear.
+
 ### PH-Specific Prompt Rules
 
 - **ATP/Printer box exclusion**: Names found near "ATP", "BIR Permit", "Printer", "Accreditation" are excluded as vendor candidates.
@@ -140,14 +157,25 @@ Post-processing corrects Gemini misreads for handwritten/low-quality receipts:
 
 ---
 
+## Vendor Research (Google Search Grounding)
+
+**Function**: `researchVendorWithGemini(vendorName, tradeName, config)`
+
+Before account assignment, the worker can call Gemini with **Google Search grounding** (`tools: [{ google_search: {} }]`) to look up the vendor and get a short summary: what the company does, its industry/sector, and what expense category a purchase from this vendor typically falls under. This context is passed into Pass 2 so that e.g. "Cursor" is classified as software/subscriptions rather than supplies.
+
+Result is truncated to 500 chars and included in the bill chatter. If the call fails or returns "No information found", account assignment continues without it.
+
+---
+
 ## Pass 2: Account Assignment
 
-**Function**: `assignAccountsWithGemini(extracted, expenseAccounts, config, industry, ocrText)`
+**Function**: `assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch)`
 
 **Input**:
 - Extracted data from Pass 1
 - Full chart of expense accounts from Odoo (`account.account` where `account_type in [expense, expense_direct_cost, expense_depreciation, asset_current]`)
 - Company industry (see [Industry Resolution](#industry-resolution))
+- **Vendor research** (optional string from Google Search grounding)
 - OCR text (for additional context)
 
 **Output schema**:
@@ -261,28 +289,43 @@ All searches: `name ilike <value>` + `supplier_rank > 0`.
 
 ## Tax & VAT Logic
 
-### Tax ID Selection (`pickTaxIds`)
+All purchase tax IDs are **auto-resolved from the target Odoo database** at runtime. There is no pre-configured VAT tax on the task or routing.
 
-Based on `vat.classification` from Gemini:
-- `exempt`, `zero_rated`, `unknown` → **no tax IDs**
-- `vatable` → picks tax IDs from target config based on `goods_or_services`
+### Tax Map (`pickVatTaxesForCompany`)
 
-Tax ID sources (from target config; field names may come from GCS `odoo_field_names.json` or .env):
-- `vat_purchase_tax_id_goods` – for goods purchases
-- `vat_purchase_tax_id_services` – for service purchases
-- `vat_purchase_tax_id_generic` – fallback
+Queries `account.tax` where `company_id`, `active`, `type_tax_use in ['purchase','none']`. Returns a **tax map** with IDs for:
 
-### Tax Auto-Resolution (`pickVatTaxesForCompany`)
+| Key | Description |
+|-----|-------------|
+| `goodsId` | 12% VAT on goods (Tax Scope: Goods), excluding capital/import/NCR |
+| `servicesId` | 12% VAT on services (Tax Scope: Services) |
+| `capitalId` | 12% VAT capital goods (equipment, PPE) |
+| `importsId` | 12% VAT imports |
+| `nonResidentId` | 12% VAT non-resident services |
+| `ncrId` | 12% VAT not directly attributable (NCR) |
+| `exemptId` | 0% VAT exempt (purchases) |
+| `exemptImportsId` | 0% VAT exempt imports |
+| `zeroRatedId` | 0% Zero rated |
+| `genericId` | Fallback 12% purchase VAT |
 
-Queries `account.tax` where `type_tax_use = purchase`, 12% VAT.
+Name/description/tax_scope and scoring (e.g. service-like vs goods-like) are used to pick the right tax. Withholding and non-purchase taxes are excluded. The map also includes `_meta: { priceInclude, amount }` for price adjustment.
 
-**Filters out**: Capital goods taxes, withholding taxes, import taxes.
+### Bill-Level Tax (`pickBillLevelTaxIds`)
 
-**Prefers**: `price_include = false` (adds VAT on top).
+Given extraction: if classification is exempt/zero_rated and no line is vatable → return exempt or zero-rated tax ID, or `[]`. Otherwise return goods, services, or generic ID based on `vat.goods_or_services`.
+
+### Per-Line Tax (`pickLineTaxIds`)
+
+For each line, using line item fields and bill-level goods_or_services and vendor country:
+
+- **vat_code exempt** → exempt (or exempt imports if `is_imported`)
+- **vat_code zero_rated** → zero-rated ID
+- **vat_code no_vat** → `[]`
+- **vat_code vatable** → if `is_capital_goods` or expense_category suggests equipment → capitalId; else if `is_imported` → importsId; else if vendor not PH and services → nonResidentId; else services or goods by `goods_or_services` and category; else genericId
 
 ### Tax Metadata (`getTaxMeta`)
 
-Reads from Odoo: `price_include`, `amount` (rate %).
+Reads from Odoo: `price_include`, `amount` (rate %). Used for price adjustment when bill-level or line tax IDs are present.
 
 ---
 
@@ -306,7 +349,7 @@ Reads from Odoo: `price_include`, `amount` (rate %).
 **Function**: `buildBillVals` – ensures Odoo bill total matches extracted grand total.
 
 1. **Expected untaxed**: `net_total` from extraction, or `grand_total / 1.12` if not provided.
-2. **Multi-line path**: After building line items, sum their untaxed amounts. If diff from `expectedUntaxed` > 0.005 and < 15%, adjust the **last line's `price_unit`** to close the gap.
+2. **Multi-line path**: After building line items, sum their untaxed amounts (each line: `price_unit × quantity × (1 − discount/100)`). If diff from `expectedUntaxed` > 0.005 and < 15%, adjust one line's `price_unit` to close the gap (prefer a line without discount).
 3. **Single-line path**: Use `expectedUntaxed` directly as `price_unit`.
 
 Result: Odoo total = expected untaxed × 1.12 ≈ grand total.
@@ -360,31 +403,33 @@ Returns `accountId: 0` – Odoo uses its own default.
 ### Per-Line Fields
 
 | Field | Source |
-|---|---|
-| `name` | **Itemized**: line item description (max 256 chars). **Single-line fallback**: extracted line item descriptions joined (if any); else `"Vendor Bill"`. Never uses `expense_account_hint.suggested_account_name` as the line label. |
+|-------|--------|
+| `name` | **Itemized**: line item description (max 256 chars). **Single-line fallback**: extracted line item descriptions joined (if any); else `"Vendor Bill"`. |
 | `quantity` | From extraction |
-| `price_unit` | Adjusted via `adjustPriceForTax()`; last line may be tweaked for total reconciliation |
+| `price_unit` | From extraction (unit_price); adjusted via `adjustPriceForTax()`; last line may be tweaked for total reconciliation |
+| `discount` | Set when `discount_percent` > 0 and < 100 (Odoo line discount %) |
 | `account_id` | From expense account cascade |
-| `tax_ids` | `[[6, 0, taxIds]]` |
+| `tax_ids` | **Per-line**: `[[6, 0, pickLineTaxIds(taxMap, item, ...)]]` — goods, services, capital, imports, exempt, zero-rated, or none. Single-line fallback uses bill-level tax IDs. |
 
 ---
 
 ## Document Linking
 
-**Function**: `linkDocumentToBill(odoo, companyId, docId, billId, logger)`
+**Function**: `linkDocumentToBill(odoo, companyId, docId, billId, logger, activeApFolderId, useIsFolder, journalId)`
 
-1. Reads original `folder_id` from the document
-2. **Archived folder**: If document is in an archived AP folder, move it to the active AP folder before linking (Odoo may block linking in archived folders)
-3. Sets `res_model = "account.move"`, `res_id = billId`, `account_move_id`, `invoice_id`
-4. **Includes `folder_id` in the same write** to try to prevent Odoo from moving the document
-5. **Retry logic** (800, 1500, 3000, 5000 ms): if folder was moved, restore it
-6. Posts a clickable link to the document in the bill's chatter
+1. **Ensure accounting folder active** (`ensureAccountingFolderActive`): Finds the company/journal accounting documents folder(s) and **unarchives** them so that opening the bill in Odoo does not trigger "It is not possible to create documents in an archived folder." Looks at `res.company.documents_account_folder_id`, `account.journal.documents_folder_id`, or archived folders named like Finance/Accounting.
+2. Reads original `folder_id` from the document
+3. **Archived folder**: If document is in an archived AP folder, move it to the active AP folder before linking
+4. Sets `res_model = "account.move"`, `res_id = billId`, `account_move_id`, `invoice_id`, and `folder_id` in one write
+5. **Retry logic** (800, 1500, 3000, 5000 ms): if folder was changed by Odoo after link, restore it
+6. Posts a clickable link to the document in the bill chatter
 
 ### Chatter Messages
 
 Posted with `body_is_html: true` (Odoo 19). Messages include:
 - Source document link
 - Vendor extraction details
+- **Vendor research** (if Google Search grounding returned a summary)
 - Account suggestions per line (code, name, resolution tier)
 - Extracted amounts (grand total, net total, tax, VAT-inclusive flag)
 - Warnings (if vendor confidence < 0.9 or extraction warnings)
@@ -407,7 +452,11 @@ BILL_OCR_PROCESSED|V1|<target_key>|doc:<doc_id>|bill:<bill_id>|...
 
 ### `run-one` Stale Link Cleanup
 
-When document's `res_model` points to a deleted `account.move`: clears `res_model`, `res_id`, `account_move_id`, `invoice_id`, then reprocesses.
+When document's `res_model` points to a deleted `account.move`: clears `res_model`, `res_id`, and (if the model has them) `account_move_id`, `invoice_id`, then reprocesses.
+
+### Document-delete webhook (`handleDocumentDelete`)
+
+When a document is deleted and the worker is notified: if a draft bill was created for that document, the worker clears the document's link fields (`res_model`, `res_id`, `account_move_id`, `invoice_id`) **before** unlinking the bill, to avoid cascade-deleting the document if the bill were still present.
 
 ---
 
@@ -429,15 +478,11 @@ Targets and accounting config come from **source Odoo** (e.g. General task with 
 
 ### Auto-Resolved / Configurable Fields
 
-These are **resolved from target Odoo** or stored in target config (field names may come from GCS `odoo_field_names.json` or config):
-
-| Purpose | Source / field names |
-|---|---|
-| `vat_purchase_tax_id_goods` | 12% VAT for goods (`account.tax`) |
-| `vat_purchase_tax_id_services` | 12% VAT for services |
-| `vat_purchase_tax_id_generic` | Generic 12% VAT |
-| `purchase_journal_id` | "Vendor Bills" journal (`account.journal`) – field name from GCS or config |
-| AP folder | `documents.document` (Odoo 17+, `is_folder=true`) or `documents.folder`; names tried: "Accounts Payable", "Account Payables", "AP", "Vendor Bills" – field name from GCS or config |
+| Purpose | Source |
+|---------|--------|
+| **VAT tax IDs** | **Always auto-resolved** from target Odoo at runtime via `pickVatTaxesForCompany` (goods, services, capital, imports, exempt, zero-rated, etc.). No VAT fields on task or routing. |
+| `purchase_journal_id` | Target: "Vendor Bills" journal (`account.journal`) – field name from GCS or config |
+| AP folder | Target: `documents.document` (Odoo 17+, `is_folder=true`) or `documents.folder`; names tried: "Accounts Payable", "Account Payables", "AP", "Vendor Bills". **Subfolders** of the AP folder are scanned via `resolveSubfolderIds` (documents in child folders are included). |
 | `industry` | Source only: General task (`x_studio_industry` or `SOURCE_GENERAL_TASK_INDUSTRY_FIELD`). No fallback from target. |
 
-Core task field names (DB, industry, stage, enabled, bill worker, multi company, company id, email, API key) come from .env (`SOURCE_GENERAL_TASK_*`). Accounting field names (AP folder, purchase journal, VAT IDs) are loaded from GCS `odoo_field_names.json` when available, with fallback to config.
+Core task field names (DB, industry, stage, enabled, bill worker, multi company, company id, email, API key) come from .env (`SOURCE_GENERAL_TASK_*`). Accounting field names (AP folder, purchase journal) are loaded from GCS `odoo_field_names.json` when available.

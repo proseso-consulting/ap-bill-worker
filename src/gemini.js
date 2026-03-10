@@ -378,8 +378,8 @@ CURRENCY DETECTION (CRITICAL):
 
 YEAR vs AMOUNT CONFUSION (CRITICAL):
 - Text like "November 2025", "October 2025", "FY 2025" contains the YEAR, not an amount.
-- NEVER use 2024, 2025, 2026, or similar year-like numbers as grand_total, net_total, or line item amounts unless they genuinely appear as monetary values (e.g. "Total: 2,025.00" with a currency symbol).
-- Cross-check: if the line items sum to a number like 530 but you extracted 2025 as grand_total, the 2025 is almost certainly a year from a date string, not the total.
+- NEVER EVER extract 2024, 2025, 2026, or similar year-like numbers as grand_total, net_total, or line item amounts. If you are about to output "2025" as a total or price, STOP. You are mistakenly reading a date as an amount. Find the actual monetary value (e.g., 530).
+- Cross-check: if the line items sum to a number like 530 but you extracted 2025 as grand_total, the 2025 is a date string, not the total.
 
 Rules:
 - invoice.date must be YYYY-MM-DD (best guess; if unknown, empty string + low confidence).
@@ -666,5 +666,6 @@ If the company is not well-known or search returns no useful results, say "No in
 module.exports = {
   extractInvoiceWithGemini,
   assignAccountsWithGemini,
-  researchVendorWithGemini
+  researchVendorWithGemini,
+  geminiWithRetryAndFallback
 };

@@ -36,13 +36,15 @@ The **AP Bill Worker** turns **uploaded supplier invoices and receipts** (PDFs o
 
 ## 2. How it works (plain language)
 
-1. **Document arrives** – Either uploaded to an “AP” folder in Odoo or sent to the worker via a webhook.
-2. **Read and understand** – The worker uses Google’s AI (Gemini) to read the document and extract: who the vendor is, invoice number and date, currency, line items (description, quantity, price), totals, and whether VAT is inclusive or not.
-3. **Match vendor** – It looks up the vendor in Odoo (by business name, trade name, or proprietor name). If confidence is high and no match exists, it can create a new vendor.
-4. **Assign accounts** – It chooses the right expense account for each line (and for the whole bill if needed), using your chart of accounts, your industry (if set), and optional feedback from past corrections.
-5. **Create draft bill** – It creates a draft vendor bill in Odoo with those details, links the document to the bill, and adds a short summary in the bill’s chatter. Your team then reviews and posts.
+1. **Document arrives** – Either uploaded to an "AP" folder (or a subfolder inside it) in Odoo or sent to the worker via a webhook.
+2. **Read and understand** – The worker uses Gemini to read the document and extract: vendor, invoice number and date, currency, line items (description, quantity, price, discount %, goods vs services, capital goods, imported, VAT treatment), totals, and whether VAT is inclusive.
+3. **Vendor research** – Optionally, Gemini uses Google Search grounding to look up the vendor and infer the type of expense (e.g. software vs supplies) for better account suggestions.
+4. **Match vendor** – It looks up the vendor in Odoo (by business name, trade name, or proprietor name). If confidence is high and no match exists, it can create a new vendor.
+5. **Assign accounts** – It chooses the right expense account for each line using your chart of accounts, industry (if set), vendor research, and feedback from past corrections.
+6. **Resolve taxes** – Purchase VAT taxes are auto-resolved from the target Odoo database (no pre-configuration). Per line, the worker picks the correct tax: 12% goods, 12% services, 12% capital goods, 12% imports, 12% non-resident services, 0% exempt, 0% zero-rated, or none.
+7. **Create draft bill** – It creates a draft vendor bill with itemized lines (including discounts where extracted), per-line tax assignment, links the document to the bill, and posts a summary in the bill chatter. Your team then reviews and posts.
 
-Philippine VAT (12%, exempt, zero-rated) and common receipt formats are handled so totals and tax amounts stay correct.
+Philippine VAT (12% goods/services/capital/imports, exempt, zero-rated) and common receipt formats are handled so totals and tax amounts stay correct.
 
 ---
 
@@ -76,7 +78,7 @@ Both AI passes use **structured JSON** (fixed schema) so the worker gets consist
 - **Invoice** – Number, date, currency.
 - **VAT** – Classification (vatable / exempt / zero-rated), goods vs services, vatable base, VAT amount, exempt/zero amounts, and a short evidence snippet.
 - **Totals** – Grand total, net total, tax total, and whether amounts are VAT-inclusive.
-- **Line items** – For each line: description, quantity, unit price, amount, and an expense category hint (e.g. office supplies, meals, rent).
+- **Line items** – For each line: description, quantity, unit price, amount, discount %, expense category, goods vs services, whether it is capital goods or imported, and per-line VAT code (vatable / exempt / zero_rated / no_vat).
 - **Expense account hint** – Suggested account name and category for the line/bill.
 - **Warnings** – e.g. “Multiple totals found”, “Low vendor confidence”.
 
@@ -95,7 +97,7 @@ Both AI passes use **structured JSON** (fixed schema) so the worker gets consist
 
 **Role:** For each line (and for the whole bill), pick the right **Odoo expense account** from your chart of accounts.
 
-**Input:** Pass 1 extraction, the company’s **expense account list** from Odoo, **industry** (if set), and OCR text for context.
+**Input:** Pass 1 extraction, the company’s **expense account list** from Odoo, **industry** (if set), **vendor research** (optional short summary from Google Search grounding), and OCR text for context.
 
 **Output:** Per-line assignments (account id, code, name, confidence, short reasoning, alternatives) plus a single “bill-level” account suggestion.
 
@@ -140,8 +142,8 @@ Company is applied via context so only that company’s chart is used.
 
 ### Tax and VAT
 
-- **Tax selection:** Based on Pass 1 VAT classification: vatable → use purchase tax IDs from config (goods / services / generic); exempt or zero-rated → no tax IDs.
-- **Tax resolution:** Worker can resolve 12% purchase VAT from Odoo (`account.tax`), excluding capital goods, withholding, import taxes, and prefers “VAT on top” (price_include = false).
+- **Tax resolution:** All purchase tax IDs are **auto-resolved** from the target Odoo database (`account.tax`, type_tax_use = purchase). No pre-configured VAT IDs on the task; the worker discovers 12% VAT goods, 12% VAT services, 12% VAT capital goods, 12% VAT imports, 12% non-resident services, 0% exempt, 0% zero-rated, and applies the correct one per line using extraction (goods_or_services, is_capital_goods, is_imported, vat_code, vendor country).
+- **Bill-level vs per-line:** Bill-level classification (vatable / exempt / zero_rated) and goods_or_services give a default; each line can override with its own VAT code and goods/services/capital/import flags for mixed invoices.
 - **Price adjustment:** When the invoice is VAT-inclusive but Odoo expects exclusive prices (or the reverse), the worker adjusts unit prices so the bill total and tax stay correct.
 
 ---
@@ -166,8 +168,9 @@ There is also a **vendor account memory** (from past corrections) that can influ
 
 ### Bill construction and document linking
 
-- **Lines:** If Pass 1 line items exist and their total is close to the invoice total (e.g. within 5%), the bill is **itemized**; otherwise a **single summary line** is used. Totals are reconciled so the Odoo bill total matches the extracted grand total (with VAT handled correctly).
-- **Document link:** The worker links the source document to the draft bill in Odoo and posts a short message in the bill’s chatter (e.g. link to document, vendor summary, account suggestions, warnings). If the document was in an **archived folder**, the worker can move it to an active AP folder before linking so Odoo does not block the operation.
+- **Lines:** If Pass 1 line items exist and their total is close to the invoice total (e.g. within 5%), the bill is **itemized**; otherwise a **single summary line** is used. Each line can have a **discount %** (from extraction); totals are reconciled so the Odoo bill total matches the extracted grand total (with VAT and discount handled correctly).
+- **Per-line tax:** Each line gets the appropriate purchase tax (12% goods, 12% services, 12% capital, 12% imports, 0% exempt, 0% zero-rated, or none) based on extraction and vendor context.
+- **Document link:** The worker ensures any **accounting documents folder** in Odoo is unarchived (so opening the bill does not trigger “archived folder” errors), then links the source document to the draft bill using `res_model`/`res_id` and `account_move_id`/`invoice_id`, and posts a short message in the bill’s chatter (link, vendor summary, vendor research if any, account suggestions, warnings).
 
 ---
 
@@ -192,9 +195,11 @@ Routing and accounting config are read from your **source Odoo** (e.g. General t
 
 - Target database (URL or DB name)
 - Target login (e.g. `x_studio_email`) and API key (e.g. `x_studio_api_key`)
-- Optional: AP folder, purchase journal, VAT tax IDs (goods/services/generic), industry
+- Optional: AP folder, purchase journal, industry
 
-Some **field names** (which Odoo field holds AP folder, journal, VAT IDs, etc.) can be overridden via a JSON file in cloud storage so you don’t need to change code when your Odoo field names differ.
+**VAT tax IDs are not configured per target.** They are **auto-resolved** from the target database at runtime (12% goods/services/capital/imports, 0% exempt/zero-rated, etc.).
+
+Some **field names** (which Odoo field holds AP folder, journal, etc.) can be overridden via a JSON file in cloud storage. Documents in **subfolders** inside the AP folder are also scanned.
 
 ---
 

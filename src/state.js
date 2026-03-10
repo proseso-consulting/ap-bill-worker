@@ -89,6 +89,53 @@ async function removeDocBillEntry(config, docId) {
   await writeJsonObject(config.gcs.stateBucket, docBillMappingObjectName(config), map);
 }
 
+// --- Bank Statement doc-to-statement-line mapping ---
+
+const bsDocMappingObjectName = (config) =>
+  `${config.bankStatement?.docStatementMappingPrefix || "BS_DOC_STATEMENT_MAPPING_V1"}/mapping.json`;
+
+async function getBsDocEntry(config, docId) {
+  if (!config.gcs.stateBucket) return null;
+  const map = await readJsonObject(config.gcs.stateBucket, bsDocMappingObjectName(config), {});
+  return map[String(docId)] || null;
+}
+
+async function persistBsDocMapping(config, docId, journalId, lineIds, targetKey) {
+  if (!config.gcs.stateBucket) return;
+  const map = await readJsonObject(config.gcs.stateBucket, bsDocMappingObjectName(config), {});
+  map[String(docId)] = {
+    journal_id: Number(journalId),
+    line_ids: lineIds.map(Number),
+    target_key: String(targetKey || "").trim(),
+    created_at: new Date().toISOString()
+  };
+  await writeJsonObject(config.gcs.stateBucket, bsDocMappingObjectName(config), map);
+}
+
+async function removeBsDocEntry(config, docId) {
+  if (!config.gcs.stateBucket) return;
+  const map = await readJsonObject(config.gcs.stateBucket, bsDocMappingObjectName(config), {});
+  delete map[String(docId)];
+  await writeJsonObject(config.gcs.stateBucket, bsDocMappingObjectName(config), map);
+}
+
+function bsStateObjectName(config, targetKey) {
+  const prefix = config.bankStatement?.bsStatePrefix || "BS_STATE_V1";
+  return `${prefix}/${encodeURIComponent(targetKey)}.json`;
+}
+
+async function loadBsState(config, targetKey) {
+  if (!config.gcs.stateBucket) return { last_doc_id: 0 };
+  return readJsonObject(config.gcs.stateBucket, bsStateObjectName(config, targetKey), {
+    last_doc_id: 0
+  });
+}
+
+async function saveBsState(config, targetKey, state) {
+  if (!config.gcs.stateBucket) return;
+  await writeJsonObject(config.gcs.stateBucket, bsStateObjectName(config, targetKey), state || {});
+}
+
 module.exports = {
   loadState,
   saveState,
@@ -99,5 +146,10 @@ module.exports = {
   saveAccountingConfigCache,
   loadOdooFieldNamesFromGcs,
   saveOdooFieldNamesToGcs,
-  odooFieldNamesObjectName
+  odooFieldNamesObjectName,
+  getBsDocEntry,
+  persistBsDocMapping,
+  removeBsDocEntry,
+  loadBsState,
+  saveBsState
 };

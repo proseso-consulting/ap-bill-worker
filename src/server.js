@@ -3,6 +3,7 @@ const { config, validateConfig } = require("./config");
 const { createLogger } = require("./logger");
 const { sleep } = require("./utils");
 const { runWorker, runOne, listApDocuments, collectFeedback, handleDocumentDelete } = require("./worker");
+const { runBsWorker, runBsOne, handleBsDocumentDelete } = require("./bs-worker");
 
 const logger = createLogger(config.server.logLevel);
 const app = express();
@@ -18,6 +19,8 @@ app.use((req, res, next) => {
 
 let isRunning = false;
 let runOneCount = 0;
+let isBsRunning = false;
+let bsRunOneCount = 0;
 
 function isAuthorized(req, bodySecret = null) {
   if (!config.server.sharedSecret) return true;
@@ -44,7 +47,9 @@ app.get("/", (_req, res) => {
   service: "ap-bill-ocr-worker",
   routes: [
     "/health", "/healthz", "/run", "/run-one", "/list-docs", "/debug",
-    "/collect-feedback", "/webhook/document-upload", "/webhook/document-delete"
+    "/collect-feedback", "/webhook/document-upload", "/webhook/document-delete",
+    "/bs/run", "/bs/run-one",
+    "/webhook/bs-document-upload", "/webhook/bs-document-delete", "/webhook/bs-chatter-message"
   ]
 });
 });
@@ -304,6 +309,153 @@ app.post("/webhook/document-delete", async (req, res) => {
     return res.status(500).json({ ok: false, error: msg });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Bank Statement Worker routes
+// ---------------------------------------------------------------------------
+
+app.post("/bs/run", async (req, res) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (isBsRunning) return res.status(409).json({ ok: false, error: "already_running" });
+  isBsRunning = true;
+  try {
+    logger.info("BS worker run started.", { trigger: "http_post" });
+    const result = await runBsWorker({ logger, payload: req.body || {} });
+    logger.info("BS worker run finished.", { elapsedMs: result.elapsedMs, targets: result.targets, processed: result.processed });
+    return res.status(200).json(result);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    logger.error("BS worker run failed.", { error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  } finally {
+    isBsRunning = false;
+  }
+});
+
+app.get("/bs/run", async (req, res) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (isBsRunning) return res.status(409).json({ ok: false, error: "already_running" });
+  isBsRunning = true;
+  try {
+    logger.info("BS worker run started.", { trigger: "http_get" });
+    const result = await runBsWorker({ logger });
+    logger.info("BS worker run finished.", { elapsedMs: result.elapsedMs });
+    return res.status(200).json(result);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    logger.error("BS worker run failed.", { error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  } finally {
+    isBsRunning = false;
+  }
+});
+
+app.post("/bs/run-one", async (req, res) => {
+  if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (isBsRunning) return res.status(409).json({ ok: false, error: "already_running", message: "Full BS worker run in progress." });
+  const maxConcurrent = config.server.runOneMaxConcurrency || 5;
+  if (bsRunOneCount >= maxConcurrent) {
+    res.setHeader("Retry-After", "30");
+    return res.status(503).json({ ok: false, error: "too_many_concurrent", message: "Max concurrent bs-run-one reached; retry later." });
+  }
+  bsRunOneCount += 1;
+  try {
+    const result = await runBsOne({ logger, payload: req.body || {} });
+    return res.status(200).json(result);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    logger.error("BS run-one failed.", { error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  } finally {
+    bsRunOneCount -= 1;
+  }
+});
+
+app.post("/webhook/bs-document-upload", async (req, res) => {
+  if (!isAuthorized(req, req.body?.worker_secret)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  if (isBsRunning) return res.status(409).json({ ok: false, error: "already_running" });
+  const maxConcurrent = config.server.runOneMaxConcurrency || 5;
+  if (bsRunOneCount >= maxConcurrent) {
+    res.setHeader("Retry-After", "30");
+    return res.status(503).json({ ok: false, error: "too_many_concurrent" });
+  }
+  const payload = req.body || {};
+  const docId = Number(payload.doc_id || payload.document_id || payload.id || 0);
+  const targetKey = String(payload.target_key || "").trim();
+  if (!docId) return res.status(400).json({ ok: false, error: "doc_id required" });
+
+  bsRunOneCount += 1;
+  const retryDelaysMs = [0, 200, 400, 800];
+  let lastError = null;
+  let lastResult = null;
+  try {
+    for (let attempt = 0; attempt < retryDelaysMs.length; attempt++) {
+      if (attempt > 0) await sleep(retryDelaysMs[attempt]);
+      try {
+        lastResult = await runBsOne({ logger, payload: { doc_id: docId, target_key: targetKey || undefined } });
+        const skip = lastResult?.result?.status === "skip" && (lastResult?.result?.reason === "no_attachment" || lastResult?.result?.reason === "attachment_not_found");
+        if (!skip) return res.status(200).json(lastResult);
+        lastError = new Error(`Transient: ${lastResult?.result?.reason}`);
+      } catch (err) {
+        lastError = err;
+        const isRace = /not found/i.test(err?.message || "");
+        if (!isRace || attempt === retryDelaysMs.length - 1) {
+          return res.status(500).json({ ok: false, error: err?.message });
+        }
+      }
+    }
+    if (lastResult) return res.status(200).json(lastResult);
+    return res.status(500).json({ ok: false, error: lastError?.message });
+  } finally {
+    bsRunOneCount -= 1;
+  }
+});
+
+app.post("/webhook/bs-document-delete", async (req, res) => {
+  if (!isAuthorized(req, req.body?.worker_secret)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  try {
+    const result = await handleBsDocumentDelete(logger, req.body || {});
+    if (result.error === "missing_doc_id") return res.status(400).json(result);
+    return res.status(200).json(result);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    logger.error("BS webhook document-delete failed.", { error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+app.post("/webhook/bs-chatter-message", async (req, res) => {
+  if (!isAuthorized(req, req.body?.worker_secret)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  const maxConcurrent = config.server.runOneMaxConcurrency || 5;
+  if (bsRunOneCount >= maxConcurrent) {
+    res.setHeader("Retry-After", "30");
+    return res.status(503).json({ ok: false, error: "too_many_concurrent" });
+  }
+  const payload = req.body || {};
+  const docId = Number(payload.doc_id || payload.document_id || payload.id || 0);
+  if (!docId) return res.status(400).json({ ok: false, error: "doc_id required" });
+
+  bsRunOneCount += 1;
+  try {
+    const result = await runBsOne({
+      logger,
+      payload: {
+        doc_id: docId,
+        target_key: payload.target_key || undefined,
+        message_body: payload.message_body || ""
+      }
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    logger.error("BS webhook chatter-message failed.", { error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  } finally {
+    bsRunOneCount -= 1;
+  }
+});
+
+// ---------------------------------------------------------------------------
 
 function start() {
   validateConfig();

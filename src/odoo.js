@@ -85,6 +85,10 @@ function kwWithCompany(companyId, extra = {}) {
   const context = cid
     ? { allowed_company_ids: [cid], force_company: cid, company_id: cid }
     : {};
+  if (extra.context) {
+    Object.assign(context, extra.context);
+    delete extra.context;
+  }
   return { context, ...extra };
 }
 

@@ -1375,7 +1375,7 @@ function isTotalLikeLabel(label) {
   const l = String(label || "").toLowerCase();
   const excludePatterns = ["line_item", "line item", "unit_price", "unit price", "vat_amount", "vat amount", "tax_amount", "tax amount", "exempt", "zero_rated"];
   if (excludePatterns.some((p) => l.includes(p))) return false;
-  return l.includes("total") || l.includes("grand") || l.includes("due") || l.includes("amount due") || l.includes("amount_due") || l === "amount";
+  return l.includes("total") || l.includes("grand") || l.includes("due") || l.includes("amount due") || l.includes("amount_due") || l === "amount" || l.includes("subtotal");
 }
 
 function fixExtractedAmounts(extracted, ocrText, logger) {
@@ -1394,20 +1394,38 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
 
   // Case Y: grand_total looks like a year (2020-2030) confused with a monetary amount
   if (!correctTotal && grandTotal >= 2020 && grandTotal <= 2030 && grandTotal === Math.floor(grandTotal)) {
-    if (lineItems.length >= 1 && lineSum > 0 && Math.abs(lineSum - grandTotal) / grandTotal > 0.1) {
+    if (lineItems.length >= 1 && lineSum > 0 && Math.abs(lineSum - grandTotal) / grandTotal > 0.1 && (lineSum < 2020 || lineSum > 2030)) {
       correctTotal = lineSum;
       if (logger) logger.info("Amount correction: grand total looks like a year number.", {
         geminiTotal: grandTotal, lineSum
       });
     } else {
       const totalCand = candidates
-        .filter((c) => isTotalLikeLabel(c.label) && Math.abs(c.amount - grandTotal) / grandTotal > 0.1)
+        .filter((c) => isTotalLikeLabel(c.label) && Math.abs(c.amount - grandTotal) / grandTotal > 0.1 && (c.amount < 2020 || c.amount > 2030))
         .sort((a, b) => b.confidence - a.confidence)[0];
       if (totalCand) {
         correctTotal = totalCand.amount;
         if (logger) logger.info("Amount correction: grand total looks like a year, using candidate.", {
           geminiTotal: grandTotal, candidateAmount: totalCand.amount, label: totalCand.label
         });
+      } else {
+        const anyCand = candidates
+          .filter((c) => Math.abs(c.amount - grandTotal) / grandTotal > 0.1 && (c.amount < 2020 || c.amount > 2030))
+          .sort((a, b) => b.amount - a.amount)[0];
+        if (anyCand) {
+          correctTotal = anyCand.amount;
+          if (logger) logger.info("Amount correction: grand total looks like a year, using largest non-year candidate.", {
+            geminiTotal: grandTotal, candidateAmount: anyCand.amount, label: anyCand.label
+          });
+        } else {
+          const nonYearOcr = ocrAmounts.filter((n) => n < 2020 || n > 2030);
+          if (nonYearOcr.length > 0) {
+            correctTotal = Math.max(...nonYearOcr);
+            if (logger) logger.info("Amount correction: grand total looks like a year, fallback to max OCR.", {
+              geminiTotal: grandTotal, maxOcr: correctTotal
+            });
+          }
+        }
       }
     }
   }
@@ -1691,6 +1709,7 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
       const acctId = lineAccountIds?.[i] || 0;
       if (acctId) line.account_id = acctId;
       if (lineTaxIds.length) line.tax_ids = [[6, 0, lineTaxIds]];
+      else line.tax_ids = [[5, 0, 0]]; // Explicitly clear taxes to prevent Odoo from applying account defaults
       invoiceLines.push([0, 0, line]);
     }
 
@@ -1740,6 +1759,7 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
     const acctId = lineAccountIds?.[0] || 0;
     if (acctId) line.account_id = acctId;
     if (billLevelTaxIds.length) line.tax_ids = [[6, 0, billLevelTaxIds]];
+    else line.tax_ids = [[5, 0, 0]]; // Explicitly clear taxes to prevent Odoo from applying account defaults
     invoiceLines.push([0, 0, line]);
   }
 
@@ -1808,11 +1828,12 @@ async function isFolderArchived(odoo, companyId, folderId) {
   if (!folderId) return false;
   for (const model of ["documents.document", "documents.folder"]) {
     try {
+      // active_test: false is required to find archived records in searchRead
       const rows = await odoo.searchRead(
         model,
         [["id", "=", Number(folderId)]],
         ["active"],
-        kwWithCompany(companyId, { limit: 1 })
+        kwWithCompany(companyId, { limit: 1, context: { active_test: false } })
       );
       if (rows?.[0]) {
         const active = rows[0].active;
@@ -1823,8 +1844,9 @@ async function isFolderArchived(odoo, companyId, folderId) {
   return false;
 }
 
-async function ensureAccountingFolderActive(odoo, companyId, journalId, logger) {
+async function ensureAccountingFolderActive(odoo, companyId, journalId, logger, additionalFolderId = 0) {
   const folderIds = new Set();
+  if (additionalFolderId) folderIds.add(Number(additionalFolderId));
 
   for (const field of ["documents_account_folder_id"]) {
     try {
@@ -1870,7 +1892,8 @@ async function ensureAccountingFolderActive(odoo, companyId, journalId, logger) 
   for (const fid of folderIds) {
     for (const model of ["documents.document", "documents.folder"]) {
       try {
-        const rows = await odoo.searchRead(model, [["id", "=", fid]], ["id", "active"], { limit: 1 });
+        // active_test: false is required to find archived records
+        const rows = await odoo.searchRead(model, [["id", "=", fid]], ["id", "active"], { limit: 1, context: { active_test: false } });
         if (rows?.[0] && (rows[0].active === false || rows[0].active === 0)) {
           await odoo.write(model, [fid], { active: true });
           if (logger) logger.info("Unarchived accounting documents folder.", { model, folderId: fid });
@@ -1881,15 +1904,14 @@ async function ensureAccountingFolderActive(odoo, companyId, journalId, logger) 
 }
 
 async function linkDocumentToBill(odoo, companyId, docId, billId, logger, activeApFolderId = 0, useIsFolder = false, journalId = 0) {
-  await ensureAccountingFolderActive(odoo, companyId, journalId, logger);
-
   const docRows = await odoo.searchRead(
     "documents.document",
     [["id", "=", Number(docId)]],
     ["id", "folder_id"],
-    kwWithCompany(companyId, { limit: 1 })
+    kwWithCompany(companyId, { limit: 1, context: { active_test: false } })
   );
   let originalFolderId = readFolderId(docRows?.[0]);
+
   const folderArchived = originalFolderId ? await isFolderArchived(odoo, companyId, originalFolderId) : false;
   if (folderArchived && activeApFolderId) {
     if (logger) logger.info("Document is in archived folder; moving to active AP folder before link.", {
@@ -1898,6 +1920,9 @@ async function linkDocumentToBill(odoo, companyId, docId, billId, logger, active
     await odoo.write("documents.document", [Number(docId)], { folder_id: activeApFolderId });
     originalFolderId = activeApFolderId;
   }
+
+  // Ensure accounting folders are active AFTER moving the document to the active AP folder (if it was archived).
+  await ensureAccountingFolderActive(odoo, companyId, journalId, logger, originalFolderId);
 
   const linkVals = {};
   if (await documentsDocumentHasField(odoo, "res_model")) linkVals.res_model = "account.move";
@@ -2204,6 +2229,24 @@ async function processOneDocument(args) {
     lineAccountIds,
     vendorCountry
   );
+  
+  // Move document to active AP folder if currently archived
+  let docFolderId = readFolderId(doc);
+  if (docFolderId) {
+    const isArchived = await isFolderArchived(odoo, companyId, docFolderId);
+    if (isArchived && argApFolderId) {
+      if (logger) logger.info("Document is in archived folder; moving to active AP folder before creation.", {
+        docId: doc.id, archivedFolderId: docFolderId, activeApFolderId: argApFolderId
+      });
+      await odoo.write("documents.document", [Number(doc.id)], { folder_id: argApFolderId });
+      docFolderId = argApFolderId;
+    }
+  }
+
+  // Ensure accounting folders are active BEFORE creating the bill, because Odoo's internal
+  // account.move creation hooks may try to create a documents.document in the journal's folder.
+  await ensureAccountingFolderActive(odoo, companyId, purchaseJournalId, logger, docFolderId);
+
   const billId = await odoo.create("account.move", billVals);
   await persistDocBillMapping(config, doc.id, billId, targetKey);
   const marker = makeProcessedMarker(

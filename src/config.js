@@ -98,6 +98,16 @@ const config = {
   },
   feedback: {
     lookbackDays: toInt(process.env.FEEDBACK_LOOKBACK_DAYS, 14)
+  },
+  bankStatement: {
+    reconcileThreshold: toFloat(process.env.BS_RECONCILE_THRESHOLD, 0.9),
+    processedMarkerPrefix: process.env.BS_PROCESSED_MARKER_PREFIX || "BANK_OCR_PROCESSED|V1|",
+    bsFolderField: process.env.SOURCE_GENERAL_TASK_BS_FOLDER_FIELD || "x_studio_bank_statement_folder_id",
+    bsWorkerField: process.env.SOURCE_GENERAL_TASK_BS_WORKER_FIELD || "x_studio_odoo_bank_statement_worker",
+    bsFolderMappingField: process.env.SOURCE_GENERAL_TASK_BS_FOLDER_MAPPING_FIELD || "x_studio_bank_folder_mapping",
+    docStatementMappingPrefix: process.env.GCS_DOC_STATEMENT_MAPPING_PREFIX || "BS_DOC_STATEMENT_MAPPING_V1",
+    bsStatePrefix: process.env.BS_STATE_PREFIX || "BS_STATE_V1",
+    mathTolerancePercent: toFloat(process.env.BS_MATH_TOLERANCE_PERCENT, 0.5)
   }
 };
 
