@@ -295,12 +295,30 @@ If you use the Bank Statement parser, you need to set up three additional webhoo
 * **URL:** Your worker base URL + `/webhook/bs-document-delete`
 * **Body/Fields:** Must include `doc_id` (record ID).
 
-**Bank Statement Chatter Message (for @worker retry):**
+**Bank Statement Chatter Message (for @bot retry):**
 * **Model:** **Message** (`mail.message`)
 * **Trigger:** On create
-* **Apply on (Domain):** `[('model', '=', 'documents.document'), ('body', 'ilike', '@worker')]`
+* **Apply on (Domain):** `[('model', '=', 'documents.document'), ('body', 'ilike', '@bot')]`
 * **URL:** Your worker base URL + `/webhook/bs-chatter-message`
 * **Body/Fields:** Send a custom body: `{"doc_id": {{ record.res_id }}, "message_body": "{{ record.body }}"}` (add `worker_secret` if needed).
+
+---
+
+#### 4. AP Bill Chatter Webhooks (Optional)
+
+You can also allow users to talk to the AI for AP Bills by mentioning `@bot` in the document chatter.
+
+**AP Bill Chatter Message (for @bot retry):**
+* **Model:** **Message** (`mail.message`)
+* **Trigger:** On create
+* **Apply on (Domain):** `[('model', '=', 'documents.document'), ('body', 'ilike', '@bot')]`
+* **URL:** Your worker base URL + `/webhook/chatter-message`
+* **Body/Fields:** Send a custom body: `{"doc_id": {{ record.res_id }}, "message_body": "{{ record.body }}"}` (add `worker_secret` if needed).
+
+Once set up, a user can type:
+- `@bot retry` - Reprocesses the document (deletes the old draft bill if it exists).
+- `@bot force` - Forces reprocessing even if the old bill is posted.
+- `@bot retry vendor is actually Blinkfreight, not Proseso` - Passes the hint to the AI during extraction.
 
 ---
 

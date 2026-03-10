@@ -323,7 +323,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
 
   const format = detectFormat(attachment.mimetype, attachment.name);
   if (!format) {
-    await postChatter(odoo, companyId, docId, `<b>Bank Statement Worker:</b> Unsupported file format: ${attachment.mimetype || attachment.name}`);
+    await postChatter(odoo, companyId, docId, `<b>🤖 Bank Statement Bot:</b> Unsupported file format: ${attachment.mimetype || attachment.name}`);
     return { status: "error", reason: "unsupported_format" };
   }
 
@@ -356,7 +356,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
     } catch (err) {
       logger.error("BS: Gemini extraction failed.", { docId, error: err?.message });
       await postChatter(odoo, companyId, docId,
-        `<b>Bank Statement Worker:</b> AI extraction failed: ${escHtml(err?.message || "Unknown error")}. Please try again with @worker retry.`
+        `<b>🤖 Bank Statement Bot:</b> AI extraction failed: ${escHtml(err?.message || "Unknown error")}. Please try again with @bot retry.`
       );
       return { status: "error", reason: "extraction_failed", error: err?.message };
     }
@@ -370,9 +370,9 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
     const errorHtml = validation.errors.map((e) => `<li>${escHtml(e)}</li>`).join("");
     const warnHtml = validation.warnings.map((w) => `<li>${escHtml(w)}</li>`).join("");
     await postChatter(odoo, companyId, docId,
-      `<b>Bank Statement Worker — Extraction Error:</b><ul>${errorHtml}</ul>` +
+      `<b>🤖 Bank Statement Bot — Extraction Error:</b><ul>${errorHtml}</ul>` +
       (warnHtml ? `<b>Warnings:</b><ul>${warnHtml}</ul>` : "") +
-      `<br/>Please upload a clearer file or use <b>@worker retry</b> with hints.`
+      `<br/>Please upload a clearer file or use <b>@bot retry</b> with hints.`
     );
     return { status: "error", reason: "validation_failed", errors: validation.errors };
   }
@@ -387,7 +387,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
 
   if (!journalResult.journal) {
     await postChatter(odoo, companyId, docId,
-      `<b>Bank Statement Worker — Journal Error:</b> ${escHtml(journalResult.error)}`
+      `<b>🤖 Bank Statement Bot — Journal Error:</b> ${escHtml(journalResult.error)}`
     );
     return { status: "error", reason: "no_journal", error: journalResult.error };
   }
@@ -400,7 +400,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
     const journalCurrency = Array.isArray(journal.currency_id) ? journal.currency_id[1] : "";
     if (journalCurrency && extracted.currency.toUpperCase() !== journalCurrency.toUpperCase()) {
       await postChatter(odoo, companyId, docId,
-        `<b>Bank Statement Worker — Currency Mismatch:</b> Statement currency is ${escHtml(extracted.currency)} but journal "${escHtml(journal.name)}" uses ${escHtml(journalCurrency)}.`
+        `<b>🤖 Bank Statement Bot — Currency Mismatch:</b> Statement currency is ${escHtml(extracted.currency)} but journal "${escHtml(journal.name)}" uses ${escHtml(journalCurrency)}.`
       );
       return { status: "error", reason: "currency_mismatch" };
     }
@@ -411,7 +411,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
     const dupeResult = await checkDuplicate(odoo, companyId, journalId, extracted);
     if (dupeResult.isDuplicate) {
       await postChatter(odoo, companyId, docId,
-        `<b>Bank Statement Worker:</b> This statement (${escHtml(extracted.statement_date_from)} to ${escHtml(extracted.statement_date_to)}) appears to already be imported (${dupeResult.existingCount} lines). Use <b>@worker retry force</b> to override.`
+        `<b>🤖 Bank Statement Bot:</b> This statement (${escHtml(extracted.statement_date_from)} to ${escHtml(extracted.statement_date_to)}) appears to already be imported (${dupeResult.existingCount} lines). Use <b>@bot retry force</b> to override.`
       );
       return { status: "skip", reason: "duplicate", existingCount: dupeResult.existingCount };
     }
@@ -436,7 +436,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
 
   if (!lineIds.length) {
     await postChatter(odoo, companyId, docId,
-      `<b>Bank Statement Worker:</b> Failed to import any transactions. Please check the file and try again.`
+      `<b>🤖 Bank Statement Bot:</b> Failed to import any transactions. Please check the file and try again.`
     );
     return { status: "error", reason: "import_failed" };
   }
@@ -469,7 +469,7 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
   const closing = extracted.closing_balance != null ? fmtNum(extracted.closing_balance) : "N/A";
   const currency = extracted.currency || "";
 
-  let summaryHtml = `<b>Bank Statement Worker — Import Successful</b><br/>`;
+  let summaryHtml = `<b>🤖 Bank Statement Bot — Import Successful</b><br/>`;
   summaryHtml += `Imported <b>${txnCount} transactions</b> (${escHtml(period)}) into <b>${escHtml(journal.name)}</b>.<br/>`;
   summaryHtml += `Opening: ${opening} / Closing: ${closing}${currency ? ` / Currency: ${escHtml(currency)}` : ""}<br/>`;
   summaryHtml += `Auto-reconciled: <b>${reconcileResult.reconciled}</b> | Needs review: <b>${reconcileResult.suggested + reconcileResult.unmatched}</b>`;

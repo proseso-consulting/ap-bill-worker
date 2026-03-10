@@ -113,7 +113,7 @@ async function matchBankJournal(odoo, companyId, extracted, options = {}) {
   const journalList = journals.map((j) => `"${j.name}" (${j.bank_acc_number || "no account"})`).join(", ");
   return {
     journal: null,
-    error: `Could not determine which Bank Journal to use. Extracted account number: "${extracted.account_number || "(none)"}". Available journals: ${journalList}. Please specify: @worker retry, journal: <name>`
+    error: `Could not determine which Bank Journal to use. Extracted account number: "${extracted.account_number || "(none)"}". Available journals: ${journalList}. Please specify: @bot retry journal: <name>`
   };
 }
 

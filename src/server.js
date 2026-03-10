@@ -47,7 +47,7 @@ app.get("/", (_req, res) => {
   service: "ap-bill-ocr-worker",
   routes: [
     "/health", "/healthz", "/run", "/run-one", "/list-docs", "/debug",
-    "/collect-feedback", "/webhook/document-upload", "/webhook/document-delete",
+    "/collect-feedback", "/webhook/document-upload", "/webhook/document-delete", "/webhook/chatter-message",
     "/bs/run", "/bs/run-one",
     "/webhook/bs-document-upload", "/webhook/bs-document-delete", "/webhook/bs-chatter-message"
   ]
@@ -307,6 +307,37 @@ app.post("/webhook/document-delete", async (req, res) => {
     const msg = err?.message || String(err);
     logger.error("Webhook document-delete failed.", { error: msg });
     return res.status(500).json({ ok: false, error: msg });
+  }
+});
+
+app.post("/webhook/chatter-message", async (req, res) => {
+  if (!isAuthorized(req, req.body?.worker_secret)) return res.status(401).json({ ok: false, error: "unauthorized" });
+  const maxConcurrent = config.server.runOneMaxConcurrency || 5;
+  if (runOneCount >= maxConcurrent) {
+    res.setHeader("Retry-After", "30");
+    return res.status(503).json({ ok: false, error: "too_many_concurrent" });
+  }
+  const payload = req.body || {};
+  const docId = Number(payload.doc_id || payload.document_id || payload.id || 0);
+  if (!docId) return res.status(400).json({ ok: false, error: "doc_id required" });
+
+  runOneCount += 1;
+  try {
+    const result = await runOne({
+      logger,
+      payload: {
+        doc_id: docId,
+        target_key: payload.target_key || undefined,
+        message_body: payload.message_body || ""
+      }
+    });
+    return res.status(200).json(result);
+  } catch (err) {
+    const msg = err?.message || String(err);
+    logger.error("Webhook chatter-message failed.", { error: msg });
+    return res.status(500).json({ ok: false, error: msg });
+  } finally {
+    runOneCount -= 1;
   }
 });
 

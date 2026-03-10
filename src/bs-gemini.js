@@ -129,8 +129,8 @@ function parseChatterHint(messageBody) {
     .replace(/&gt;/g, ">")
     .trim();
 
-  // Remove the @worker command prefix
-  text = text.replace(/@worker\s*(retry|run|reconcile|force)?\s*,?\s*/gi, "").trim();
+  // Remove the @bot / @ocr command prefix
+  text = text.replace(/@(bot|ocr|worker|ai)\s*(retry|run|reconcile|force)?\s*,?\s*/gi, "").trim();
   return text;
 }
 

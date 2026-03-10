@@ -387,8 +387,12 @@ Rules:
 - NEVER default to "other" category if the vendor name gives a clear hint about what they sell.`;
 }
 
-async function extractInvoiceWithGemini(ocrText, config, attachment) {
-  const parts = [{ text: buildPrompt(ocrText) }];
+async function extractInvoiceWithGemini(ocrText, config, attachment, userHint = "") {
+  let promptText = buildPrompt(ocrText);
+  if (userHint) {
+    promptText += `\n\nUSER HINT (CRITICAL - prioritize this info):\n${userHint}`;
+  }
+  const parts = [{ text: promptText }];
 
   const mimetype = String(attachment?.mimetype || "").toLowerCase();
   const canInline = mimetype.startsWith("image/") || mimetype === "application/pdf";

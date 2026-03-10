@@ -1979,7 +1979,8 @@ async function processOneDocument(args) {
     industry,
     reprocess = false,
     apFolderId: argApFolderId = 0,
-    useIsFolder: argUseIsFolder = false
+    useIsFolder: argUseIsFolder = false,
+    userHint = ""
   } = args;
   const attachmentId = m2oId(doc.attachment_id);
   if (!attachmentId) return { status: "skip", reason: "no_attachment" };
@@ -2065,7 +2066,7 @@ async function processOneDocument(args) {
     return { status: "skip", reason: "ocr_too_short" };
   }
 
-  const extracted = await extractInvoiceWithGemini(ocrText, config, att);
+  const extracted = await extractInvoiceWithGemini(ocrText, config, att, userHint);
   fixExtractedAmounts(extracted, ocrText, logger);
   let vendor = await findVendor(odoo, companyId, extracted, ocrText);
   if (!vendor.id) {
@@ -2266,7 +2267,7 @@ async function processOneDocument(args) {
     companyId,
     "documents.document",
     doc.id,
-    `✅ Draft Vendor Bill created: account.move #${billId}<br/>Vendor=${vendor.name || "(unknown)"}`
+    `✅ <b>🤖 AP Bot:</b> Draft Vendor Bill created: account.move #${billId}<br/>Vendor=${vendor.name || "(unknown)"}`
   );
 
   {
@@ -2474,9 +2475,28 @@ async function runOne({ logger, payload = {} }) {
   const targetKeyInput = String(payload.target_key || "").trim();
   const docId = Number(payload.doc_id || payload.document_id || payload.id || 0);
   const attachmentId = Number(payload.attachment_id || 0);
+  const messageBody = String(payload.message_body || "").trim();
   if (!docId && !attachmentId) {
     throw new Error("run-one requires either doc_id or attachment_id.");
   }
+
+  let userHint = "";
+  let isBotCommand = false;
+  let isForce = false;
+  let isRetry = false;
+
+  if (messageBody) {
+    const plainText = messageBody.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    isBotCommand = /@(bot|ocr|worker|ai)\b/i.test(plainText);
+    isForce = isBotCommand && /\bforce\b/i.test(plainText);
+    isRetry = isBotCommand && /\bretry|run\b/i.test(plainText);
+    
+    if (isBotCommand) {
+      userHint = plainText.replace(/@(bot|ocr|worker|ai)\s*(retry|run|force)?\s*,?\s*/gi, "").trim();
+    }
+  }
+
+  const forceReprocess = isForce || isRetry || !!(payload.reprocess || payload.force_reprocess);
 
   let target = null;
   if (targetKeyInput) {
@@ -2536,17 +2556,43 @@ async function runOne({ logger, payload = {} }) {
       kwWithCompany(companyId, { limit: 1 })
     );
     if (existingBill?.length) {
-      const reprocess = !!(payload.reprocess || payload.force_reprocess);
-      if (!reprocess) {
+      const billState = existingBill[0].state;
+      if (!forceReprocess) {
         logger.info("Document already linked to bill; skipping.", {
-          docId: doc.id, billId: doc.res_id, state: existingBill[0].state
+          docId: doc.id, billId: doc.res_id, state: billState
         });
         return {
           ok: true, mode: "run-one", time_start: timeStart, time_completed: new Date().toISOString(),
           targetKey: target.targetKey,
           doc: { id: Number(doc.id), name: String(doc.name || ""), attachment_id: m2oId(doc.attachment_id) },
-          result: { status: "skip", reason: "already_linked", billId: Number(doc.res_id), billState: String(existingBill[0].state || "") }
+          result: { status: "skip", reason: "already_linked", billId: Number(doc.res_id), billState }
         };
+      } else {
+        if (billState === "draft") {
+          logger.info("Deleting old draft bill for retry.", { docId: doc.id, billId: doc.res_id });
+          try {
+            await odoo.executeKw("account.move", "unlink", [[Number(doc.res_id)]], kwWithCompany(companyId));
+            const clearVals = { res_model: false, res_id: false };
+            if (await documentsDocumentHasField(odoo, "account_move_id")) clearVals.account_move_id = false;
+            if (await documentsDocumentHasField(odoo, "invoice_id")) clearVals.invoice_id = false;
+            await odoo.write("documents.document", [Number(doc.id)], clearVals);
+            doc.res_model = false;
+            doc.res_id = false;
+          } catch (e) {
+            logger.warn("Failed to delete old draft bill on retry", { error: e.message });
+          }
+        } else if (billState !== "draft" && !isForce) {
+          logger.info("Bill is not draft; refusing to retry without force.", { docId: doc.id, billId: doc.res_id });
+          await odoo.executeKw("documents.document", "message_post", [[doc.id]], kwWithCompany(companyId, { 
+            body: "⚠️ <b>🤖 Bot:</b> Cannot retry because the linked bill is already posted/cancelled. Use <b>@bot force</b> to create a duplicate draft anyway." 
+          }));
+          return {
+            ok: true, mode: "run-one", time_start: timeStart, time_completed: new Date().toISOString(),
+            targetKey: target.targetKey,
+            doc: { id: Number(doc.id), name: String(doc.name || ""), attachment_id: m2oId(doc.attachment_id) },
+            result: { status: "skip", reason: "posted_no_force", billId: Number(doc.res_id), billState }
+          };
+        }
       }
     } else {
       logger.info("Clearing stale bill link from document (bill was deleted).", {
@@ -2579,9 +2625,10 @@ async function runOne({ logger, payload = {} }) {
     resolvedVatIds,
     purchaseJournalId: target.purchaseJournalId,
     industry: target.industry,
-    reprocess: !!(payload.reprocess || payload.force_reprocess),
+    reprocess: forceReprocess,
     apFolderId: runOneApFolderId,
-    useIsFolder: runOneUseIsFolder
+    useIsFolder: runOneUseIsFolder,
+    userHint
   });
 
   return {
