@@ -925,10 +925,15 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText) {
   };
 }
 
-function pickBillLevelTaxIds(taxMap, extracted) {
+function pickBillLevelTaxIds(taxMap, extracted, vendorCountry) {
   const classification = String(extracted?.vat?.classification || "").toLowerCase();
   const lineItems = extracted?.line_items || [];
   const anyLineVatable = lineItems.some((li) => String(li.vat_code || "").toLowerCase() === "vatable");
+
+  // Foreign vendors: their local tax (GST/VAT) is not PH input VAT — fully expense
+  const foreignAddr = String(vendorCountry || "").toLowerCase();
+  const isPH = !foreignAddr || /philipp|^ph$/i.test(foreignAddr);
+  if (!isPH) return [];
 
   if (!anyLineVatable && (classification === "exempt" || classification === "zero_rated" || classification === "unknown")) {
     if (classification === "exempt" && taxMap.exemptId) return [taxMap.exemptId];
@@ -966,7 +971,8 @@ function pickLineTaxIds(taxMap, lineItem, billGoodsOrServices, vendorCountry) {
   const foreignCountry = String(vendorCountry || "").toLowerCase();
   const isPH = !foreignCountry || /philipp|^ph$/i.test(foreignCountry);
 
-  if (!isPH && gs === "services" && taxMap.nonResidentId) return [taxMap.nonResidentId];
+  // Foreign vendors: their local tax (GST/VAT) is not PH input VAT — fully expense
+  if (!isPH) return [];
 
   if (gs === "services" && taxMap.servicesId) return [taxMap.servicesId];
   if (gs === "goods" && taxMap.goodsId) return [taxMap.goodsId];
@@ -2150,7 +2156,8 @@ async function processOneDocument(args) {
   const currencyCode = String(extracted?.invoice?.currency || "").trim();
   const currencyId = await resolveCurrencyId(odoo, companyId, currencyCode);
   const taxMap = resolvedVatIds;
-  const billLevelTaxIds = pickBillLevelTaxIds(taxMap, extracted);
+  const vendorCountry = String(extracted?.vendor_details?.address || "").trim();
+  const billLevelTaxIds = pickBillLevelTaxIds(taxMap, extracted, vendorCountry);
   const taxMeta = billLevelTaxIds.length ? await getTaxMeta(odoo, companyId, billLevelTaxIds) : taxMap._meta;
 
   // --- Vendor research (Google Search grounding) ---
@@ -2247,7 +2254,6 @@ async function processOneDocument(args) {
     });
   }
 
-  const vendorCountry = String(extracted?.vendor_details?.address || "").trim();
   const billVals = buildBillVals(
     extracted,
     vendor.id,
