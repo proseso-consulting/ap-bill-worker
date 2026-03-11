@@ -174,42 +174,114 @@ async function processBsTarget(target, startMs, logger) {
   // Find BS folder: only process documents in a folder whose name contains "bank"
   // (from task config or auto-detect). If none found, batch run skips this target.
   let folderId = bsFolderId;
-  if (!folderId) {
-    try {
-      const folders = await odoo.searchRead(
-        "documents.folder", [["name", "ilike", "bank"]], ["id", "name"],
-        kwWithCompany(companyId, { limit: 10 })
-      );
-      if (folders.length === 1) {
-        folderId = folders[0].id;
-        tLogger.info("BS: using folder with 'bank' in name.", { folderId, folderName: folders[0].name });
-      } else if (folders.length > 1) {
-        const preferred = folders.find((f) => /bank\s*statement/i.test(String(f.name || "")));
-        folderId = preferred ? preferred.id : folders[0].id;
-        tLogger.info("BS: using folder with 'bank' in name.", { folderId, folderName: preferred?.name || folders[0].name });
-      } else {
-        tLogger.warn("BS: no folder with 'bank' in name — skipping batch scan for this target. Use a dedicated Bank Statements folder or webhook/run-one with doc_id.");
-      }
-    } catch (_) { /* folder search may fail if documents module not installed */ }
-  }
+  let workspaceId = null;
 
   if (!folderId) {
+    try {
+      let folders = [];
+      
+      // Get ALL folders first, since case-insensitive search might be flaky on some Odoo versions
+      try {
+        folders = await odoo.searchRead(
+          "documents.folder", [], ["id", "name", "parent_folder_id"],
+          kwWithCompany(companyId, { limit: 200 })
+        );
+      } catch (err) {
+        if (!err?.message?.includes("doesn't exist")) throw err;
+      }
+      
+      if (folders && folders.length > 0) {
+        // Try to find one named Bank Statement
+        let preferred = folders.find((f) => /bank\s*statement/i.test(String(f.name || "")));
+        
+        // Next try just bank
+        if (!preferred) {
+          preferred = folders.find((f) => /bank/i.test(String(f.name || "")));
+        }
+        
+        // Next try finance
+        if (!preferred) {
+          preferred = folders.find((f) => /finance/i.test(String(f.name || "")));
+        }
+        
+        // Next try accounting
+        if (!preferred) {
+          preferred = folders.find((f) => /accounting/i.test(String(f.name || "")));
+        }
+
+        if (preferred) {
+          folderId = preferred.id;
+          tLogger.info("BS: using matching bank/finance folder.", { folderId, folderName: preferred.name });
+        } else {
+          tLogger.warn("BS: no folder with 'bank', 'finance' or 'accounting' in name — skipping batch scan for this target.");
+        }
+      } 
+      
+      if (!folderId) {
+        // Fallback for newer Odoo versions where `documents.folder` is deprecated in favor of `documents.workspace`
+        // But first check if it's because folders array was empty but `documents.folder` exists (like Odoo 16/17 where you might not have a matching folder)
+        try {
+          // Use folder_id
+          const workspaces = await odoo.searchRead(
+            "documents.document", [], ["folder_id"],
+            kwWithCompany(companyId, { limit: 500 })
+          );
+          
+          if (workspaces && workspaces.length > 0) {
+            // we have to extract unique workspaces from the documents
+            const workspaceMap = new Map();
+            for (const doc of workspaces) {
+              if (doc.folder_id && Array.isArray(doc.folder_id)) {
+                workspaceMap.set(doc.folder_id[0], doc.folder_id[1]);
+              }
+            }
+            
+            const uniqueWorkspaces = Array.from(workspaceMap.entries()).map(([id, name]) => ({id, name}));
+            
+            let preferred = uniqueWorkspaces.find((w) => /bank\s*statement/i.test(String(w.name || "")));
+            if (!preferred) preferred = uniqueWorkspaces.find((w) => /bank/i.test(String(w.name || "")));
+            if (!preferred) preferred = uniqueWorkspaces.find((w) => /finance/i.test(String(w.name || "")));
+            if (!preferred) preferred = uniqueWorkspaces.find((w) => /accounting/i.test(String(w.name || "")));
+            if (!preferred && uniqueWorkspaces.length === 1) preferred = uniqueWorkspaces[0];
+            
+            if (preferred) {
+              folderId = preferred.id;
+              tLogger.info("BS: using matching bank/finance folder via document lookup.", { folderId, folderName: preferred.name });
+            } else {
+              tLogger.warn("BS: no folder with 'bank', 'finance' or 'accounting' in name — skipping batch scan for this target.");
+            }
+          } else {
+            tLogger.warn("BS: no documents folders or workspaces found — skipping batch scan for this target.");
+          }
+        } catch (err) {
+          tLogger.warn("BS: folder search via documents failed — skipping batch scan for this target.", { error: err?.message });
+        }
+      }
+    } catch (err) { tLogger.warn("folder search failed", { error: err?.message }); }
+  }
+
+  if (!folderId && !workspaceId) {
     return { targetKey, processed: 0, skipped: "no_bank_folder" };
   }
 
   // List candidate documents (only in the bank folder)
   const docDomain = [
     ["is_folder", "=", false],
-    ["attachment_id", "!=", false],
-    ["folder_id", "=", folderId]
+    ["attachment_id", "!=", false]
   ];
+  if (folderId) docDomain.push(["folder_id", "=", folderId]);
+  else if (workspaceId) docDomain.push(["workspace_id", "=", workspaceId]);
 
   let docs = [];
   try {
+    let fieldsToFetch = ["id", "name", "attachment_id", "create_uid"];
+    if (folderId) fieldsToFetch.push("folder_id");
+    if (workspaceId) fieldsToFetch.push("workspace_id");
+    
     docs = await odoo.searchRead(
       "documents.document",
       docDomain,
-      ["id", "name", "folder_id", "attachment_id", "create_uid"],
+      fieldsToFetch,
       kwWithCompany(companyId, { limit: 50, order: "id asc" })
     );
   } catch (err) {
@@ -279,7 +351,7 @@ async function runBsOne({ logger, payload = {} }) {
 
   const docs = await odoo.searchRead(
     "documents.document", [["id", "=", docId]],
-    ["id", "name", "folder_id", "attachment_id", "create_uid"],
+    ["id", "name", "folder_id", "workspace_id", "attachment_id", "create_uid"],
     kwWithCompany(companyId, { limit: 1 })
   );
   if (!docs.length) throw new Error(`Document ${docId} not found.`);
@@ -378,7 +450,10 @@ async function processBsDocument({ odoo, companyId, targetKey, doc, logger, conf
   }
 
   // Match journal
-  const folderName = doc.folder_id ? (Array.isArray(doc.folder_id) ? doc.folder_id[1] : "") : "";
+  let folderName = "";
+  if (doc.folder_id) folderName = Array.isArray(doc.folder_id) ? doc.folder_id[1] : "";
+  if (doc.workspace_id && !folderName) folderName = Array.isArray(doc.workspace_id) ? doc.workspace_id[1] : "";
+  
   const journalResult = await matchBankJournal(odoo, companyId, extracted, {
     folderName,
     userHint,
