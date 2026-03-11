@@ -28,7 +28,8 @@ function isAuthorized(req, bodySecret = null) {
   if (ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1") return true;
   const headerToken = (req.header("x-worker-secret") || "").trim();
   const bodyToken = bodySecret != null ? String(bodySecret || "").trim() : "";
-  const token = headerToken || bodyToken;
+  const queryToken = (req.query.worker_secret || "").trim();
+  const token = headerToken || bodyToken || queryToken;
   return token && token === config.server.sharedSecret;
 }
 
