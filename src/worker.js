@@ -816,7 +816,14 @@ async function findVendor(odoo, companyId, extracted, ocrText) {
 
   const details = extracted?.vendor_details || {};
   const tradeName = String(details.trade_name || "").trim();
-  const proprietorName = String(details.proprietor_name || "").trim();
+  const proprietorObj = typeof details.proprietor_name === "object" && details.proprietor_name !== null ? details.proprietor_name : {};
+  let proprietorName = "";
+  if (proprietorObj.first_name || proprietorObj.middle_name || proprietorObj.last_name) {
+     proprietorName = [proprietorObj.first_name, proprietorObj.middle_name, proprietorObj.last_name].filter(Boolean).join(" ");
+  } else {
+     proprietorName = String(details.proprietor_name || "").trim();
+  }
+
   const searchNames = [vendorName];
   if (tradeName && tradeName.toLowerCase() !== vendorName.toLowerCase()) searchNames.push(tradeName);
   if (proprietorName && proprietorName.toLowerCase() !== vendorName.toLowerCase()) searchNames.push(proprietorName);
