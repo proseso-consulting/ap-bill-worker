@@ -1146,7 +1146,7 @@ function pickLineTaxIds(taxMap, lineItem, billGoodsOrServices, vendorCountry, ex
 
   if (gs === "services" && taxMap.servicesId) return [taxMap.servicesId];
   if (gs === "goods" && taxMap.goodsId) return [taxMap.goodsId];
-  if (cat && /professional_fees|rent|repairs|freight|utilities/.test(cat) && taxMap.servicesId) return [taxMap.servicesId];
+  if (cat && /professional_fees|rent|repairs|freight|utilities|commission|contractor/.test(cat) && taxMap.servicesId) return [taxMap.servicesId];
   if (cat && /office_supplies|inventory|fuel|meals/.test(cat) && taxMap.goodsId) return [taxMap.goodsId];
 
   return taxMap.genericId ? [taxMap.genericId] : [];
@@ -1182,9 +1182,9 @@ function pickEwtTaxId(taxMap, expenseCategory, goodsOrServices, entityFlags) {
   // Non-TWA: only specific categories per BIR RR 11-2018
   if (cat === "professional_fees") return taxMap.ewt10Id || taxMap.ewt15Id || 0;
   if (cat === "rent") return taxMap.ewt5Id || 0;
-  if (cat === "repairs") return taxMap.ewt2Id || 0;
+  if (cat === "repairs" || cat === "contractor") return taxMap.ewt2Id || 0;
   if (cat === "freight") return taxMap.ewt2Id || 0;
-  if (/commission/i.test(cat)) return taxMap.ewt10Id || 0;
+  if (cat === "commission") return taxMap.ewt10Id || 0;
 
   return 0;
 }

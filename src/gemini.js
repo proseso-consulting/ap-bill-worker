@@ -201,7 +201,7 @@ const extractionSchema = {
           amount: { type: "number" },
           unit_price_includes_vat: { type: "boolean", description: "true if the unit_price shown on the invoice already includes VAT" },
           discount_percent: { type: "number", description: "Discount percentage applied to this line (0-100). 0 if no discount. E.g. 5 means 5% discount, so net = unit_price * qty * (1 - 5/100)" },
-          expense_category: { type: "string", description: "office_supplies|meals|repairs|rent|fuel|professional_fees|freight|utilities|inventory|equipment|other" },
+          expense_category: { type: "string", description: "office_supplies|meals|repairs|rent|fuel|professional_fees|freight|utilities|inventory|equipment|commission|contractor|other" },
           goods_or_services: { type: "string", description: "Per-line: goods|services|unknown. 'goods' for physical items/supplies/inventory. 'services' for labor/consulting/professional fees/rent/repairs/subscriptions/SaaS." },
           is_capital_goods: { type: "boolean", description: "true if this line is a capital asset/equipment purchase (machinery, vehicles, computers, furniture, fixtures, PPE/property-plant-equipment). false for consumable supplies." },
           is_imported: { type: "boolean", description: "true if this line item is clearly imported from abroad (foreign supplier, customs duties mentioned, import documentation). false if domestic or unclear." },
@@ -373,11 +373,14 @@ ${ocrText || "(no OCR text available)"}
 
 LINE ITEM CATEGORIZATION:
 - For each line_items[] entry, set expense_category to the best matching category based on the item description AND vendor context:
-  office_supplies, meals, repairs, rent, fuel, professional_fees, freight, utilities, inventory, supplies, other
+  office_supplies, meals, repairs, rent, fuel, professional_fees, freight, utilities, inventory, supplies, commission, contractor, other
 - Examples: LPG/gas/diesel -> "fuel", paper/ink/toner -> "office_supplies", electricity/water -> "utilities",
-  consulting/legal/audit -> "professional_fees", food/catering -> "meals", shipping/delivery -> "freight",
-  fabric/cloth/textile/thread -> "inventory" or "supplies", hardware/tools -> "supplies", lumber/cement -> "inventory"
+  consulting/legal/audit/accounting/legal/medical -> "professional_fees", food/catering -> "meals", shipping/delivery -> "freight",
+  fabric/cloth/textile/thread -> "inventory" or "supplies", hardware/tools -> "supplies", lumber/cement -> "inventory",
+  sales commission/agent fee/broker fee/referral fee -> "commission",
+  construction/building/renovation/plumbing/electrical work/general contractor -> "contractor"
 - If the item description is unreadable or a brand name (e.g. "Hiroshi #7" from a fabric vendor), use the VENDOR NAME to determine the category. A fabric vendor sells fabric → "inventory" or "supplies", NOT "other".
+- IMPORTANT for withholding tax: Distinguish between "professional_fees" (lawyers, CPAs, engineers, architects, doctors, consultants), "contractor" (construction, building, renovation, specialty trades), and "commission" (sales agents, brokers, insurance agents). These have different withholding tax rates under Philippine BIR rules.
 
 PERMIT / LICENSE FEE DISTINCTION (CRITICAL):
 - "Taxes and Licenses" (or similar) accounts are for the ACTUAL government fee — the amount paid directly to the government for a permit, license, or tax assessment.
