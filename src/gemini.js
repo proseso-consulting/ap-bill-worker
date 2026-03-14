@@ -95,7 +95,7 @@ const extractionSchema = {
             country: { type: "string", description: "Country name" }
           }
         },
-        entity_type: { type: "string", description: "corporation|sole_proprietor|individual|unknown" },
+        entity_type: { type: "string", description: "corporation|sole_proprietor|individual|general_professional_partnership|unknown" },
         trade_name: { type: "string", description: "Business/trade name (DBA). For sole proprietors this is the shop/store name that differs from the owner's personal name" },
         proprietor_name: {
           type: "object",
@@ -112,7 +112,7 @@ const extractionSchema = {
     expense_account_hint: {
       type: "object",
       properties: {
-        category: { type: "string", description: "office_supplies|meals|repairs|rent|fuel|professional_fees|freight|other" },
+        category: { type: "string", description: "office_supplies|meals|repairs|rent|fuel|professional_fees|outsourced_services|freight|utilities|commission|contractor|other" },
         suggested_account_name: { type: "string" },
         confidence: { type: "number" },
         evidence: { type: "string" }
@@ -152,6 +152,19 @@ const extractionSchema = {
         "zero_rated_amount", "zero_rated_amount_confidence",
         "evidence"
       ]
+    },
+    withholding_tax: {
+      type: "object",
+      description: "Withholding tax (EWT/CWT) information detected on the invoice, if any. Philippine invoices may show EWT amounts, BIR Form 2307 references, or ATC codes.",
+      properties: {
+        detected: { type: "boolean", description: "true if any withholding tax information is visible on the invoice (EWT amount, BIR 2307 reference, ATC code, or 'less withholding tax' line)" },
+        ewt_amount: { type: "number", description: "Withholding tax amount shown on the invoice (the amount withheld). 0 if not detected." },
+        ewt_rate: { type: "number", description: "Withholding tax rate shown or implied (e.g. 1, 2, 5, 10, 15). 0 if not detected." },
+        atc_code: { type: "string", description: "BIR Alphanumeric Tax Code if shown (e.g. WI100, WC010, WI157). Empty if not detected." },
+        bir_form_reference: { type: "string", description: "BIR form number referenced (e.g. '2307', '2306'). Empty if not detected." },
+        evidence: { type: "string", description: "Short text snippet from the invoice showing the withholding tax info. Empty if not detected." }
+      },
+      required: ["detected", "ewt_amount", "ewt_rate", "atc_code", "bir_form_reference", "evidence"]
     },
     totals: {
       type: "object",
@@ -201,7 +214,7 @@ const extractionSchema = {
           amount: { type: "number" },
           unit_price_includes_vat: { type: "boolean", description: "true if the unit_price shown on the invoice already includes VAT" },
           discount_percent: { type: "number", description: "Discount percentage applied to this line (0-100). 0 if no discount. E.g. 5 means 5% discount, so net = unit_price * qty * (1 - 5/100)" },
-          expense_category: { type: "string", description: "office_supplies|meals|repairs|rent|fuel|professional_fees|freight|utilities|inventory|equipment|other" },
+          expense_category: { type: "string", description: "office_supplies|meals|repairs|rent|fuel|professional_fees|outsourced_services|freight|utilities|inventory|equipment|commission|contractor|other" },
           goods_or_services: { type: "string", description: "Per-line: goods|services|unknown. 'goods' for physical items/supplies/inventory. 'services' for labor/consulting/professional fees/rent/repairs/subscriptions/SaaS." },
           is_capital_goods: { type: "boolean", description: "true if this line is a capital asset/equipment purchase (machinery, vehicles, computers, furniture, fixtures, PPE/property-plant-equipment). false for consumable supplies." },
           is_imported: { type: "boolean", description: "true if this line item is clearly imported from abroad (foreign supplier, customs duties mentioned, import documentation). false if domestic or unclear." },
@@ -216,6 +229,7 @@ const extractionSchema = {
     "vendor", "vendor_candidates",
     "invoice",
     "vat",
+    "withholding_tax",
     "totals",
     "amount_candidates",
     "line_items",
@@ -295,6 +309,7 @@ VENDOR DETAIL REQUIREMENTS (PH):
   - "corporation" if the name ends with Inc., Corp., Co., LLC, Corporation, etc.
   - "sole_proprietor" if there is BOTH a trade/business name AND a personal owner name (e.g. "Prop.", "Owner:", or a personal name under/near a business name)
   - "individual" if the vendor is clearly a person with no business name
+  - "general_professional_partnership" (GPP) if the vendor is a partnership of licensed professionals (law firms, CPA firms, medical/dental partnerships). Look for: "& Associates", "& Partners", "& Co.", "Law Offices", "Law Firm", "CPA", "CPAs", "Attorneys", or multiple partner names listed. GPPs are exempt from income tax (pass-through to partners) and NOT subject to EWT.
   - "unknown" if you cannot determine
 - vendor_details.trade_name: the business/trade name (DBA). For sole proprietors, this is the shop name (e.g. "JORJEL LAUNDRY SHOP"). For corporations, same as vendor.name. Empty if not applicable.
 - vendor_details.proprietor_name: the owner/proprietor's personal name if entity is sole_proprietor. Look for keywords like "Prop.", "Owner", "Proprietor", or a personal name printed below/near the business name. Empty string if not a sole proprietor or not found.
@@ -302,6 +317,9 @@ VENDOR DETAIL REQUIREMENTS (PH):
   - "JORJEL LAUNDRY SHOP" with "JOCELYN E. SANTOS - Prop." → trade_name="JORJEL LAUNDRY SHOP", proprietor_name="JOCELYN E. SANTOS", entity_type="sole_proprietor"
   - "NONVAT Reg. TIN: 740-326-198-00000" → this is the TIN, not the proprietor
   - "SM PRIME HOLDINGS, INC." → entity_type="corporation", trade_name="SM PRIME HOLDINGS, INC.", proprietor_name=""
+  - "REYES & SANTOS LAW OFFICES" → entity_type="general_professional_partnership"
+  - "CRUZ, GARCIA & ASSOCIATES, CPAs" → entity_type="general_professional_partnership"
+  - "DELA CRUZ ACCOUNTING FIRM" (single CPA with staff, Inc.) → entity_type="corporation" (NOT GPP — it's incorporated)
 
 PH VAT RULES (IMPORTANT):
 - Decide vat.classification (BILL LEVEL — if ANY line has VAT, classification should be "vatable"):
@@ -373,11 +391,43 @@ ${ocrText || "(no OCR text available)"}
 
 LINE ITEM CATEGORIZATION:
 - For each line_items[] entry, set expense_category to the best matching category based on the item description AND vendor context:
-  office_supplies, meals, repairs, rent, fuel, professional_fees, freight, utilities, inventory, supplies, other
+  office_supplies, meals, repairs, rent, fuel, professional_fees, outsourced_services, freight, utilities, inventory, supplies, commission, contractor, other
 - Examples: LPG/gas/diesel -> "fuel", paper/ink/toner -> "office_supplies", electricity/water -> "utilities",
-  consulting/legal/audit -> "professional_fees", food/catering -> "meals", shipping/delivery -> "freight",
-  fabric/cloth/textile/thread -> "inventory" or "supplies", hardware/tools -> "supplies", lumber/cement -> "inventory"
+  food/catering -> "meals", shipping/delivery -> "freight",
+  fabric/cloth/textile/thread -> "inventory" or "supplies", hardware/tools -> "supplies", lumber/cement -> "inventory",
+  sales commission/agent fee/broker fee/referral fee -> "commission",
+  construction/building/renovation/plumbing/electrical work/general contractor -> "contractor"
 - If the item description is unreadable or a brand name (e.g. "Hiroshi #7" from a fabric vendor), use the VENDOR NAME to determine the category. A fabric vendor sells fabric → "inventory" or "supplies", NOT "other".
+
+PROFESSIONAL FEES vs OUTSOURCED SERVICES (CRITICAL for withholding tax):
+- "professional_fees" = services rendered by LICENSED PROFESSIONALS practicing their profession:
+  lawyers, CPAs/accountants, engineers, architects, doctors, dentists, auditors, appraisers, management consultants.
+  These are subject to higher EWT rates (WI100/WC100: 5-15%).
+- "outsourced_services" = general business services NOT requiring a professional license:
+  BPO, staffing/manpower, janitorial, security, IT support, bookkeeping services, payroll processing,
+  consulting firms providing outsourced operations (e.g. "Outsourcing Services Inc.", "Staffing Solutions"),
+  marketing services, advertising agencies, call centers, data entry.
+  These are subject to 2% EWT (WC120/WI120).
+- KEY DISTINCTION: A company named "XYZ Consulting" or "XYZ Outsourcing Services" that provides
+  outsourced staff, BPO, or operational support is "outsourced_services" NOT "professional_fees".
+  Only classify as "professional_fees" when the vendor is a licensed professional or professional firm
+  (law firm, CPA firm, engineering firm, medical clinic) providing professional opinions/expertise.
+- "contractor" = construction, building, renovation, specialty trades (2% EWT per WI140/WC140).
+- "commission" = sales agents, brokers, insurance agents (10% EWT per WI150/WC150).
+
+WITHHOLDING TAX DETECTION:
+- Look for any withholding tax (EWT/CWT) information on the invoice:
+  - "Less: Withholding Tax", "Less: EWT", "Less: CWT", "W/Tax", "WHT"
+  - BIR Form 2307 or 2306 references
+  - ATC codes (e.g. WI100, WC010, WI157, WI158, WC100)
+  - A "Withholding Tax" line item that reduces the total amount due
+  - Percentage indicators like "EWT 2%", "WHT 5%", "10% EWT"
+- Set withholding_tax.detected = true if ANY of the above are found
+- Extract the ewt_amount (the amount being withheld, as a positive number)
+- Extract the ewt_rate if shown (e.g. 2 for 2%, 10 for 10%)
+- Extract the atc_code if visible (e.g. "WI100", "WC010")
+- Extract bir_form_reference if a BIR form number is mentioned
+- If none of these are found, set detected = false and all other fields to 0 or ""
 
 PERMIT / LICENSE FEE DISTINCTION (CRITICAL):
 - "Taxes and Licenses" (or similar) accounts are for the ACTUAL government fee — the amount paid directly to the government for a permit, license, or tax assessment.
@@ -680,10 +730,11 @@ async function researchVendorWithGemini(vendorName, tradeName, config) {
   if (!name || name.length < 2) return null;
 
   const prompt = `Look up the company "${name}" using Google Search.
-Return a SHORT factual summary (max 3 sentences) covering:
+Return a SHORT factual summary (max 4 sentences) covering:
 1. What the company does / what products or services it sells
 2. The industry or sector (e.g. "SaaS / developer tools", "food & beverage distribution", "office supplies retail")
-3. What expense category a purchase from this vendor would typically fall under in accounting (e.g. "Software & Subscriptions", "Meals & Entertainment", "Professional Fees", "Office Supplies", "Utilities")
+3. What expense category a purchase from this vendor would typically fall under in accounting (e.g. "Software & Subscriptions", "Meals & Entertainment", "Professional Fees", "Outsourced Services", "Office Supplies", "Utilities")
+4. For Philippine service providers: Is this a LICENSED PROFESSIONAL FIRM (law, CPA, engineering, medical) or a GENERAL SERVICE/OUTSOURCING company? This matters for withholding tax classification.
 
 If the company is not well-known or search returns no useful results, say "No information found." and nothing else.`;
 
