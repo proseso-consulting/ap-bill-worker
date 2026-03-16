@@ -2199,7 +2199,9 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
 
       // Append EWT (withholding tax) if applicable
       const lineGs = String(item.goods_or_services || billGs || "").toLowerCase();
-      const ewtId = pickEwtTaxId(taxMap, item.expense_category, lineGs, entityFlags, extracted, acctMeta.name, acctMeta.code);
+      // acctMeta.category comes from Gemini account assignment (authoritative); falls back to extraction-time category
+      const lineEwtCat = acctMeta.category || item.expense_category;
+      const ewtId = pickEwtTaxId(taxMap, lineEwtCat, lineGs, entityFlags, extracted, acctMeta.name, acctMeta.code);
       if (ewtId && !lineTaxIds.includes(ewtId)) {
         // Suppress EWT when it came from AI category (not account/invoice) but the account contradicts it.
         // Account-sourced EWT: pickEwtByAccount returns non-zero (most reliable).
@@ -2212,7 +2214,7 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
         } else {
           lineTaxIds = [...lineTaxIds, ewtId];
           anyEwtApplied = true;
-          if (!whtDetectedOnInvoice && isProfFeesContext(item.expense_category, acctMeta.name)) profFeesEwtApplied = true;
+          if (!whtDetectedOnInvoice && isProfFeesContext(lineEwtCat, acctMeta.name)) profFeesEwtApplied = true;
         }
       }
 
@@ -2284,7 +2286,9 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
     const singleCat = lineItems[0]?.expense_category || hint.category || "other";
     const singleGs = String(extracted?.vat?.goods_or_services || "").toLowerCase();
     const singleAcctMeta = lineAccountMeta?.[0] || {};
-    const singleEwtId = pickEwtTaxId(taxMap, singleCat, singleGs, entityFlags, extracted, singleAcctMeta.name, singleAcctMeta.code);
+    // acctMeta.category from Gemini account assignment is authoritative; falls back to extraction-time category
+    const singleEwtCat = singleAcctMeta.category || singleCat;
+    const singleEwtId = pickEwtTaxId(taxMap, singleEwtCat, singleGs, entityFlags, extracted, singleAcctMeta.name, singleAcctMeta.code);
     // Refine goods/services discrimination using account name (same logic as multi-line path)
     const singleVatableTaxIds = new Set([taxMap.goodsId, taxMap.servicesId, taxMap.genericId].filter(Boolean));
     let singleTaxIds = [...billLevelTaxIds];
@@ -2304,7 +2308,7 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
       } else {
         singleTaxIds.push(singleEwtId);
         anyEwtApplied = true;
-        if (!whtDetectedOnInvoice && isProfFeesContext(singleCat, singleAcctMeta.name)) profFeesEwtApplied = true;
+        if (!whtDetectedOnInvoice && isProfFeesContext(singleEwtCat, singleAcctMeta.name)) profFeesEwtApplied = true;
       }
     }
     if (singleTaxIds.length) line.tax_ids = [[6, 0, singleTaxIds]];
@@ -2892,7 +2896,7 @@ async function processOneDocument(args) {
     });
     lineAccountIds.push(resolved.accountId);
     lineAccountSources.push(resolved.source);
-    lineAccountMeta.push({ code: resolved.accountCode || "", name: resolved.accountName || "" });
+    lineAccountMeta.push({ code: resolved.accountCode || "", name: resolved.accountName || "", category: geminiPick?.expense_category || "" });
     logger.info("Account resolved.", {
       docId: doc.id, line: i, category, lineDesc: lineDesc.slice(0, 40),
       accountId: resolved.accountId, source: resolved.source
