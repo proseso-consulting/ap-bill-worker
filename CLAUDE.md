@@ -1,23 +1,22 @@
 # Claude Code Configuration
 
-## GitHub API Access
+## GitHub CLI
 
-A GitHub classic PAT with `repo` scope is needed for API calls (creating PRs, etc.).
-The user will provide the token at the start of each session, or store it in a local
-`.env` file (gitignored) as `GITHUB_TOKEN=<token>`.
-
-### Creating a PR
+`gh` CLI is authenticated and works for all GitHub operations (PRs, merges, checks).
 
 ```bash
-curl -s -X POST "https://api.github.com/repos/proseso-sys-admin/ap-bill-worker/pulls" \
-  -H "Authorization: token $GITHUB_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"title": "...", "head": "branch-name", "base": "master", "body": "..."}'
+# Create PR
+gh pr create --title "..." --base master --body "..."
+
+# Merge PR (squash)
+gh pr merge <number> --squash --delete-branch
+
+# List PRs
+gh pr list --repo proseso-sys-admin/ap-bill-worker
 ```
 
 ## Notes
 
-- The git remote uses a local proxy that only supports git protocol — `gh` CLI is unavailable.
 - Always push to a `claude/<name>-<session-id>` branch; direct pushes to `master` return 403.
 
 ---
