@@ -1344,6 +1344,8 @@ function pickEwtTaxId(taxMap, expenseCategory, goodsOrServices, entityFlags, ext
   }
   // Outsourced services: 2% (WI120/WC120) — NOT professional fees
   if (cat === "outsourced_services") return ewtIdByRate(taxMap, 2, vendorIndiv);
+  // Advertising / marketing / promotional services: 2% (WC120) per BIR
+  if (cat === "advertising") return ewtIdByRate(taxMap, 2, vendorIndiv);
   // Rental: 5% (WI100/WC100)
   if (cat === "rent") return ewtIdByRate(taxMap, 5, vendorIndiv);
   // Contractors/repairs: 2% (WI140/WC140)
@@ -1391,6 +1393,9 @@ function pickEwtByAccount(accountName, accountCode, taxMap, vendorIsIndividual, 
   // Outsourced / contracted services → 2% (WI120/WC120)
   // Note: security[\s-]?serv avoids matching unrelated "security" account names (e.g. "Security Deposit")
   if (/outsourc|janitorial|security[\s-]?serv|manpower|staffing|subcontract/.test(name)) return ewtIdByRate(taxMap, 2, vendorIsIndividual);
+
+  // Advertising / marketing / promotion → 2% (WC120)
+  if (/advertis|marketing|promotion/.test(name)) return ewtIdByRate(taxMap, 2, vendorIsIndividual);
 
   // Commission / brokerage → 10% (WI150/WC150)
   if (/\b(commission|brokerage)\b/.test(name)) return ewtIdByRate(taxMap, 10, vendorIsIndividual);

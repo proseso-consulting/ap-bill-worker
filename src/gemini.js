@@ -566,7 +566,7 @@ const accountAssignmentSchema = {
           account_code: { type: "string", description: "The code of the chosen account" },
           account_name: { type: "string", description: "The name of the chosen account" },
           confidence: { type: "number", description: "0-1 confidence in the match" },
-          expense_category: { type: "string", description: "The expense category CONSISTENT WITH the account you chose: office_supplies|meals|repairs|rent|fuel|professional_fees|outsourced_services|freight|utilities|inventory|equipment|commission|contractor|other. This is the authoritative category — it overrides the extraction-time category for EWT determination." },
+          expense_category: { type: "string", description: "The expense category CONSISTENT WITH the account you chose: office_supplies|meals|repairs|rent|fuel|professional_fees|outsourced_services|advertising|freight|utilities|inventory|equipment|commission|contractor|other. This is the authoritative category — it overrides the extraction-time category for EWT determination." },
           reasoning: { type: "string", description: "Brief explanation of why this account was chosen" },
           alternatives: {
             type: "array",
@@ -745,13 +745,13 @@ RULES (MANDATORY - follow ALL):
    - Utilities (electricity, water, telecom, internet) → "Utilities" account → expense_category: "utilities" (EWT: 2% if TWA)
    - Goods / inventory / supplies purchased for resale or use → Inventory/Supplies/COGS account → expense_category: "inventory" (EWT: 1% if TWA)
    - Equipment / camera / machinery purchase → Equipment or appropriate asset/COGS account → expense_category: "equipment" (NO rent EWT — equipment is a purchase, not a rental)
-   - Advertising / marketing spend → "Advertising and Promotion" account → expense_category: "other" (no EWT unless outsourced agency)
+   - Advertising / marketing / promotional spend → "Advertising and Promotion" account → expense_category: "advertising" (EWT: 2%, WC120)
    Do NOT conflate professional fees with outsourced services — they have different EWT rates and ATC codes.
    Do NOT put a rent payment under "Office Supplies" or "Miscellaneous".
    Do NOT assign rent EWT (WC100/WI100) to equipment purchases — equipment is capital, not rental.
 
 11. EXPENSE_CATEGORY MUST MATCH ACCOUNT — for every line, set expense_category to the value that is consistent with the account you chose. The system uses expense_category to apply the correct withholding tax; an inconsistency between account and category causes wrong EWT. Examples:
-   - You chose "628000 Advertising and Promotion" → expense_category must be "other" (not "rent")
+   - You chose "628000 Advertising and Promotion" → expense_category must be "advertising" (EWT: 2%)
    - You chose "630000 Rent Expense" → expense_category must be "rent" (not "other")
    - You chose "Professional Fees" → expense_category must be "professional_fees"
    - You chose "Repairs & Maintenance" → expense_category must be "repairs"`;
