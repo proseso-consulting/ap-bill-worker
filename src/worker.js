@@ -1286,10 +1286,11 @@ function pickEwtTaxId(taxMap, expenseCategory, goodsOrServices, entityFlags, ext
   }
 
   // Non-TWA: specific categories per BIR RR 11-2018
-  // Professional fees: WI010 5%/10% individual, WC010 10%/15% corporate
+  // Professional fees: always apply the higher rate for conservatism (BIR RR 2-98 / RR 14-2018).
+  // Lower rate (5% individual / 10% corporate) requires a Sworn Declaration from the vendor.
   if (cat === "professional_fees") {
-    if (vendorIndiv === false) return ewtIdByRate(taxMap, 15, false) || ewtIdByRate(taxMap, 10, false);
-    return ewtIdByRate(taxMap, 10, true) || ewtIdByRate(taxMap, 5, true);
+    if (vendorIndiv === false) return ewtIdByRate(taxMap, 15, false);
+    return ewtIdByRate(taxMap, 10, true);
   }
   // Outsourced services: 2% (WI120/WC120) — NOT professional fees
   if (cat === "outsourced_services") return ewtIdByRate(taxMap, 2, vendorIndiv);
@@ -1330,11 +1331,11 @@ function pickEwtByAccount(accountName, accountCode, taxMap, vendorIsIndividual, 
   // Rent / rental / lease → 5% (WI100/WC100)
   if (/rent|rental|lease/.test(name)) return ewtIdByRate(taxMap, 5, vendorIsIndividual);
 
-  // Licensed professional fees → 5% individual, 10-15% corporate (WI010/WC010)
+  // Licensed professional fees → higher rate for conservatism (WI010/WC010)
   // Note: \blegal\b prevents false match on "paralegal"; "consulting" covered separately
   if (/professional.fee|professional.service|consultanc|consulting.fee|\blegal\b|audit\b|advisory|accountant|engineer|architect|doctor|notari/.test(name)) {
-    if (vendorIsIndividual === false) return ewtIdByRate(taxMap, 15, false) || ewtIdByRate(taxMap, 10, false);
-    return ewtIdByRate(taxMap, 10, true) || ewtIdByRate(taxMap, 5, true);
+    if (vendorIsIndividual === false) return ewtIdByRate(taxMap, 15, false);
+    return ewtIdByRate(taxMap, 10, true);
   }
 
   // Outsourced / contracted services → 2% (WI120/WC120)
@@ -2093,6 +2094,16 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
   const hint = extracted?.expense_account_hint || {};
   const invoiceLines = [];
 
+  // Track whether the system applied the conservative higher rate for professional fees.
+  // Not set when the invoice itself already shows an explicit EWT rate (we honour that instead).
+  let profFeesEwtApplied = false;
+  const whtDetectedOnInvoice = !!(extracted?.withholding_tax?.detected);
+  const PROF_FEES_ACCOUNT_RE = /professional.fee|professional.service|consultanc|consulting.fee|\blegal\b|audit\b|advisory|accountant|engineer|architect|doctor|notari/;
+  const isProfFeesContext = (category, accountName) => {
+    if (String(category || "").toLowerCase() === "professional_fees") return true;
+    return PROF_FEES_ACCOUNT_RE.test(String(accountName || "").toLowerCase());
+  };
+
   const expectedUntaxed = hasBillTax && !taxPriceInclude && grandTotal > 0
     ? (netTotal > 0 ? netTotal : Math.round((grandTotal / (1 + taxRate / 100)) * 100) / 100)
     : (grandTotal || netTotal || 0);
@@ -2117,6 +2128,7 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
       const ewtId = pickEwtTaxId(taxMap, item.expense_category, lineGs, entityFlags, extracted, acctMeta.name, acctMeta.code);
       if (ewtId && !lineTaxIds.includes(ewtId)) {
         lineTaxIds = [...lineTaxIds, ewtId];
+        if (!whtDetectedOnInvoice && isProfFeesContext(item.expense_category, acctMeta.name)) profFeesEwtApplied = true;
       }
 
       const lineHasTax = lineTaxIds.length > 0 && lineVatCode !== "no_vat";
@@ -2189,7 +2201,10 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
     const singleAcctMeta = lineAccountMeta?.[0] || {};
     const singleEwtId = pickEwtTaxId(taxMap, singleCat, singleGs, entityFlags, extracted, singleAcctMeta.name, singleAcctMeta.code);
     let singleTaxIds = [...billLevelTaxIds];
-    if (singleEwtId && !singleTaxIds.includes(singleEwtId)) singleTaxIds.push(singleEwtId);
+    if (singleEwtId && !singleTaxIds.includes(singleEwtId)) {
+      singleTaxIds.push(singleEwtId);
+      if (!whtDetectedOnInvoice && isProfFeesContext(singleCat, singleAcctMeta.name)) profFeesEwtApplied = true;
+    }
     if (singleTaxIds.length) line.tax_ids = [[6, 0, singleTaxIds]];
     else line.tax_ids = [[5, 0, 0]]; // Explicitly clear taxes to prevent Odoo from applying account defaults
     invoiceLines.push([0, 0, line]);
@@ -2206,7 +2221,7 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
   if (currencyId) vals.currency_id = Number(currencyId);
   if (ref) vals.ref = ref;
   if (invoiceDate) vals.invoice_date = invoiceDate;
-  return vals;
+  return { vals, profFeesEwtApplied };
 }
 
 const documentFieldSupportCache = new Map();
@@ -2773,7 +2788,7 @@ async function processOneDocument(args) {
     });
   }
 
-  const billVals = buildBillVals(
+  const { vals: billVals, profFeesEwtApplied } = buildBillVals(
     extracted,
     vendor.id,
     companyId,
@@ -2983,6 +2998,21 @@ async function processOneDocument(args) {
           odoo, companyId, "account.move", Number(billId),
           `<b>🏛️ EWT applied</b> — ${ewtParts.join(". ")}. ` +
           `Expanded withholding tax applied on bill lines per BIR RR 11-2018.`
+        );
+      }
+      if (profFeesEwtApplied) {
+        const vendorIndivForMsg = isVendorIndividual(extracted);
+        const higherRate = vendorIndivForMsg === false ? 15 : 10;
+        const lowerRate = vendorIndivForMsg === false ? 10 : 5;
+        const profFeesNote = vendorIndivForMsg !== false
+          ? `To avail the lower ${lowerRate}% rate, the vendor must submit a <b>Sworn Declaration</b> ` +
+            `(Annex B-2 of BIR RR 14-2018) certifying that their gross receipts for the current year ` +
+            `will not exceed ₱3,000,000. Please request this document from the vendor before processing payment.`
+          : `${higherRate}% is the standard rate for corporate/juridical persons under ATC WC010 (BIR RR 2-98). ` +
+            `If the vendor qualifies for the ${lowerRate}% rate, request the applicable BIR exemption certificate or ruling.`;
+        await safeMessagePost(
+          odoo, companyId, "account.move", Number(billId),
+          `<b>📋 Professional fees EWT — ${higherRate}% applied (conservative rate).</b><br/>${profFeesNote}`
         );
       }
     }
