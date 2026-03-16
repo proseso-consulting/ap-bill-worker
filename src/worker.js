@@ -2201,11 +2201,19 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
       const lineGs = String(item.goods_or_services || billGs || "").toLowerCase();
       const ewtId = pickEwtTaxId(taxMap, item.expense_category, lineGs, entityFlags, extracted, acctMeta.name, acctMeta.code);
       if (ewtId && !lineTaxIds.includes(ewtId)) {
-        lineTaxIds = [...lineTaxIds, ewtId];
-        anyEwtApplied = true;
-        if (!whtDetectedOnInvoice && isProfFeesContext(item.expense_category, acctMeta.name)) profFeesEwtApplied = true;
-        const mismatch = ewtAccountMismatch(taxMap, ewtId, acctMeta.name);
-        if (mismatch) ewtMismatches.push({ lineDesc: String(item.description || item.name || "").slice(0, 50), ...mismatch, accountName: acctMeta.name });
+        // Suppress EWT when it came from AI category (not account/invoice) but the account contradicts it.
+        // Account-sourced EWT: pickEwtByAccount returns non-zero (most reliable).
+        // Invoice-sourced EWT: invoice explicitly shows withholding tax (also reliable).
+        const acctEwtId = pickEwtByAccount(acctMeta.name, acctMeta.code, taxMap, isVendorIndividual(extracted), entityFlags?.isTopWithholdingAgent);
+        const mismatch = (acctEwtId === 0 && !whtDetectedOnInvoice)
+          ? ewtAccountMismatch(taxMap, ewtId, acctMeta.name) : null;
+        if (mismatch) {
+          ewtMismatches.push({ lineDesc: String(item.description || item.name || "").slice(0, 50), ...mismatch, accountName: acctMeta.name });
+        } else {
+          lineTaxIds = [...lineTaxIds, ewtId];
+          anyEwtApplied = true;
+          if (!whtDetectedOnInvoice && isProfFeesContext(item.expense_category, acctMeta.name)) profFeesEwtApplied = true;
+        }
       }
 
       const lineHasTax = lineTaxIds.length > 0 && lineVatCode !== "no_vat";
@@ -2288,11 +2296,16 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
       if (singleRefined.length) singleTaxIds = singleRefined;
     }
     if (singleEwtId && !singleTaxIds.includes(singleEwtId)) {
-      singleTaxIds.push(singleEwtId);
-      anyEwtApplied = true;
-      if (!whtDetectedOnInvoice && isProfFeesContext(singleCat, singleAcctMeta.name)) profFeesEwtApplied = true;
-      const singleMismatch = ewtAccountMismatch(taxMap, singleEwtId, singleAcctMeta.name);
-      if (singleMismatch) ewtMismatches.push({ lineDesc: String(lineItems[0]?.description || "").slice(0, 50), ...singleMismatch, accountName: singleAcctMeta.name });
+      const singleAcctEwtId = pickEwtByAccount(singleAcctMeta.name, singleAcctMeta.code, taxMap, isVendorIndividual(extracted), entityFlags?.isTopWithholdingAgent);
+      const singleMismatch = (singleAcctEwtId === 0 && !whtDetectedOnInvoice)
+        ? ewtAccountMismatch(taxMap, singleEwtId, singleAcctMeta.name) : null;
+      if (singleMismatch) {
+        ewtMismatches.push({ lineDesc: String(lineItems[0]?.description || "").slice(0, 50), ...singleMismatch, accountName: singleAcctMeta.name });
+      } else {
+        singleTaxIds.push(singleEwtId);
+        anyEwtApplied = true;
+        if (!whtDetectedOnInvoice && isProfFeesContext(singleCat, singleAcctMeta.name)) profFeesEwtApplied = true;
+      }
     }
     if (singleTaxIds.length) line.tax_ids = [[6, 0, singleTaxIds]];
     else line.tax_ids = [[5, 0, 0]]; // Explicitly clear taxes to prevent Odoo from applying account defaults
