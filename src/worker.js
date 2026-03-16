@@ -3018,6 +3018,38 @@ async function processOneDocument(args) {
     }
   }
 
+  // Entity mismatch: warn if the invoice is addressed to a different entity than the Odoo company
+  {
+    const billedToName = String(extracted?.billed_to?.name || "").trim();
+    const billedToConf = Number(extracted?.billed_to?.confidence || 0);
+    if (billedToName && billedToConf >= 0.5) {
+      try {
+        const companyRows = await odoo.searchRead(
+          "res.company", [["id", "=", companyId]], ["id", "name"], { limit: 1 }
+        );
+        const companyName = String(companyRows?.[0]?.name || "").trim();
+        if (companyName) {
+          const normalize = (s) => s.toLowerCase()
+            .replace(/\b(inc|corp|ltd|pte|llc|co\b|sa|sdn|bhd|pty|plc|ph|sg)\b\.?/gi, "")
+            .replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+          const normBilled = normalize(billedToName);
+          const normCompany = normalize(companyName);
+          const isMatch = normBilled.includes(normCompany) || normCompany.includes(normBilled)
+            || normBilled.split(" ").filter(Boolean).some((w) => w.length > 3 && normCompany.includes(w));
+          if (!isMatch) {
+            await safeMessagePost(
+              odoo, companyId, "account.move", Number(billId),
+              `<b>⚠️ Entity mismatch — please verify.</b><br/>` +
+              `Invoice is addressed to: <b>${billedToName}</b><br/>` +
+              `Bill recorded under: <b>${companyName}</b><br/>` +
+              `If this invoice belongs to a different entity, please move it to the correct company before posting.`
+            );
+          }
+        }
+      } catch (_) {}
+    }
+  }
+
   const feedbackCount = Number(geminiAssignments?._feedbackCount || 0);
   const vendorMemoryLines = lineAccountSources
     .map((s, i) => (s === "vendor_memory" ? i + 1 : null))
