@@ -1753,6 +1753,32 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
     }
   }
 
+  // Case J: grand_total inconsistent with vatable_base + tax_total (BIR-format invoices).
+  // On PH BIR invoices: VATtable Sales + VAT = Total Amount Due. If vatable_base and
+  // tax_total are mutually consistent at ~12% but grand_total differs significantly,
+  // the total was misread (e.g. Gemini picked a date like "March 12, 2026" → 122026).
+  if (!correctTotal && grandTotal >= 1) {
+    const taxTotalJ = Number(totals.tax_total || 0);
+    const vatableBaseJ = Number(extracted?.vat?.vatable_base || 0);
+    if (taxTotalJ > 0 && vatableBaseJ >= 100) {
+      const impliedRate = taxTotalJ / vatableBaseJ;
+      if (impliedRate > 0.10 && impliedRate < 0.14) {
+        const expectedTotal = vatableBaseJ + taxTotalJ;
+        const ratio = grandTotal / expectedTotal;
+        if (ratio > 2 || ratio < 0.5) {
+          // Confirm with line sum when available (avoids false positives on mixed invoices)
+          const lineSumConfirms = lineSum <= 0 || Math.abs(lineSum - expectedTotal) / expectedTotal < 0.2;
+          if (lineSumConfirms) {
+            correctTotal = expectedTotal;
+            if (logger) logger.info("Amount correction: grand_total inconsistent with vatable+tax (BIR format).", {
+              geminiTotal: grandTotal, vatableBaseJ, taxTotalJ, expectedTotal, ratio: ratio.toFixed(2)
+            });
+          }
+        }
+      }
+    }
+  }
+
   // Case I: tax_total > grand_total (impossible — tax cannot exceed total)
   if (!correctTotal && grandTotal >= 1) {
     const taxTotal = Number(totals.tax_total || 0);
