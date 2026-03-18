@@ -67,22 +67,30 @@ async function pickVatTaxesForCompany(odoo, companyId) {
   const isNonResident = (t) => has(t, /non[-\s]?resident|\bnr\b|\bs\s*nr\b/);
   const isExempt = (t) => has(t, /exempt/);
   const isZeroRated = (t) => has(t, /zero[-\s]?rat/);
-  const serviceLike = (t) => (scope(t) === "service" || has(t, /service|consult|professional|repair|rent|labor|contract|freight/)) && !isCapital(t) && !isNonResident(t);
-  const goodsLike = (t) => (scope(t) === "consu" || scope(t) === "goods" || has(t, /goods|supply|material|inventory|product|merch/)) && !isCapital(t) && !isImport(t);
+  // tax_scope is authoritative when set; name heuristics are fallback only
+  const hasGoodsScope = (t) => scope(t) === "consu" || scope(t) === "goods";
+  const hasServiceScope = (t) => scope(t) === "service";
+  const serviceLike = (t) => (hasServiceScope(t) || has(t, /service|consult|professional|repair|rent|labor|contract|freight/)) && !isCapital(t) && !isNonResident(t);
+  const goodsLike = (t) => (hasGoodsScope(t) || has(t, /goods|supply|material|inventory|product|merch/)) && !isCapital(t) && !isImport(t);
 
   const pct12 = taxes.filter((t) => t.amount_type === "percent" && Math.abs(Number(t.amount || 0) - 12) < 0.01 && !isWithholding(t));
   const pct0 = taxes.filter((t) => t.amount_type === "percent" && Math.abs(Number(t.amount || 0)) < 0.01 && !isWithholding(t));
 
   const pick = (arr, scorer) => pickTopTaxByScore(arr, scorer);
 
-  const goods = pick(pct12.filter((t) => !isCapital(t) && !isImport(t) && !isNcr(t) && !isNonResident(t)), (t) => {
+  // For goods/services, prefer taxes with explicit tax_scope first; fall back to all candidates
+  const baseGoodsCandidates = pct12.filter((t) => !isCapital(t) && !isImport(t) && !isNcr(t) && !isNonResident(t));
+  const scopedGoodsCandidates = baseGoodsCandidates.filter(hasGoodsScope);
+  const scopedServiceCandidates = baseGoodsCandidates.filter(hasServiceScope);
+
+  const goods = pick(scopedGoodsCandidates.length ? scopedGoodsCandidates : baseGoodsCandidates, (t) => {
     let s = 0;
     if (goodsLike(t)) s += 10;
     if (!serviceLike(t) && !isExempt(t)) s += 3;
     if (!t.price_include) s += 1;
     return s;
   });
-  const services = pick(pct12.filter((t) => !isCapital(t) && !isImport(t) && !isNcr(t) && !isNonResident(t)), (t) => {
+  const services = pick(scopedServiceCandidates.length ? scopedServiceCandidates : baseGoodsCandidates, (t) => {
     let s = 0;
     if (serviceLike(t)) s += 10;
     if (!goodsLike(t) && !isExempt(t)) s += 3;
