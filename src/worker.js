@@ -774,8 +774,6 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText) {
     vals.company_type = "company";
     vals.is_company = true;
     if (tradeName && tradeName.toLowerCase() !== name.toLowerCase()) {
-      vals.name = tradeName; // For companies, if trade name is different, often it's better to use Trade Name as the primary name, but we keep `name` as is and put trade name in comment, or if they want it in a field:
-      // Actually, if it's a company, standard Odoo doesn't have a Trade Name field. We put it in comment.
       notes.push(`DBA: ${tradeName}`);
     }
   }
