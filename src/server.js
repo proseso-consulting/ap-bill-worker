@@ -74,42 +74,14 @@ app.get("/list-docs", async (req, res) => {
 app.post("/debug", async (req, res) => {
   if (!isAuthorized(req)) return res.status(401).json({ ok: false, error: "unauthorized" });
   const { OdooClient, kwWithCompany } = require("./odoo");
-  const { loadRoutingSheetData, loadRoutingRows, getRoutingRowValidation } = require("./sheets");
-  const { getRoutingSummary } = require("./worker");
+  const { getRoutingSummary, getTargetsFromOdoo } = require("./worker");
   try {
     const routingSummary = await getRoutingSummary(logger);
-    const { rows: rawRows } = await loadRoutingSheetData(config);
-    const toBool = (v) => ["1", "true", "yes", "y"].includes(String(v || "").trim().toLowerCase());
-    const first25 = rawRows.slice(0, 25).map((r, i) => ({
-      index: i + 1,
-      db: String(r.target_db || "").trim(),
-      enabled: String(r.enabled || "").trim(),
-      validation: getRoutingRowValidation(r)
-    }));
-    const enabledRows = rawRows
-      .map((r, i) => ({ row: r, index: i + 1 }))
-      .filter(({ row }) => toBool(row.enabled))
-      .map(({ row, index }) => ({
-        index,
-        db: String(row.target_db || "").trim(),
-        enabled: String(row.enabled || "").trim(),
-        validation: getRoutingRowValidation(row)
-      }));
-    Object.assign(routingSummary, {
-      rawRowCount: rawRows.length,
-      rawRowsValidation: first25,
-      enabledRowsValidation: enabledRows
-    });
-    const rows = await loadRoutingRows(config);
-    if (!rows.length) return res.json({ ok: false, error: "no routing rows", routingSummary });
-    const row = rows[0];
-    const odoo = new OdooClient({
-      baseUrl: row.target_base_url,
-      db: row.target_db,
-      login: row.target_login,
-      password: row.target_password
-    });
-    const companyId = row.target_company_id;
+    const targets = await getTargetsFromOdoo(logger);
+    if (!targets.length) return res.json({ ok: false, error: "no targets loaded from Odoo", routingSummary });
+    const target = targets[0];
+    const odoo = new OdooClient(target.targetCfg);
+    const companyId = target.companyId;
     const results = {};
 
     results.auth = { uid: await odoo.authenticate() };
@@ -159,8 +131,8 @@ app.post("/debug", async (req, res) => {
     return res.json({
       ok: true,
       routingSummary,
-      target: row.target_base_url,
-      db: row.target_db,
+      target: target.targetCfg.baseUrl,
+      db: target.targetCfg.db,
       companyId,
       results
     });

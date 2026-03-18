@@ -1,12 +1,6 @@
 // @ts-nocheck
 const { config } = require("./config");
 const { OdooClient, kwWithCompany } = require("./odoo");
-const {
-  loadRoutingSheetData,
-  saveRoutingSheetData,
-  toRoutingRowStrict,
-  loadAccountMapping
-} = require("./sheets");
 const { ocrTextForAttachment } = require("./vision");
 const { extractInvoiceWithGemini, assignAccountsWithGemini, researchVendorWithGemini } = require("./gemini");
 const { m2oId, normalizeOdooBaseUrl, deriveDbFromBaseUrl, isFalsyOdooValue, sleep } = require("./utils");
@@ -34,156 +28,6 @@ function outOfTime(startMs) {
   return Date.now() - startMs > config.budget.runBudgetMs - config.budget.reserveMs;
 }
 
-function parseAcctDb(raw) {
-  if (isFalsyOdooValue(raw)) return { target_base_url: "", target_db: "" };
-  const s = String(raw).trim();
-  if (!s) return { target_base_url: "", target_db: "" };
-  if (s.startsWith("{") && s.endsWith("}")) {
-    try {
-      const o = JSON.parse(s);
-      const bu = normalizeOdooBaseUrl(o.baseUrl || o.target_base_url || "");
-      const db = bu ? deriveDbFromBaseUrl(bu) : String(o.db || o.target_db || "").trim();
-      const bu2 = bu || normalizeOdooBaseUrl(db);
-      return { target_base_url: bu2, target_db: deriveDbFromBaseUrl(bu2) || db };
-    } catch (_) {
-      return { target_base_url: "", target_db: "" };
-    }
-  }
-  if (/^https?:\/\//i.test(s)) {
-    const bu = normalizeOdooBaseUrl(s);
-    return { target_base_url: bu, target_db: deriveDbFromBaseUrl(bu) };
-  }
-  const bu = normalizeOdooBaseUrl(s);
-  return { target_base_url: bu, target_db: deriveDbFromBaseUrl(bu) };
-}
-
-async function getSourceOdooTargetMap(logger, rows = []) {
-  const src = config.odooDefaults;
-  if (!src.sourceBaseUrl || !src.sourceDb || !src.sourceLogin || !src.sourcePassword) {
-    return null;
-  }
-  const projectIds = [
-    ...new Set(
-      rows
-        .map((r) => Number(r.source_project_id || 0))
-        .filter((n) => Number.isFinite(n) && n > 0)
-    )
-  ];
-  if (!projectIds.length) return new Map();
-  try {
-    const odoo = new OdooClient({
-      baseUrl: src.sourceBaseUrl,
-      db: src.sourceDb,
-      login: src.sourceLogin,
-      password: src.sourcePassword
-    });
-    const generalStageName = src.sourceGeneralTaskStageName || "General";
-    const industryField = config.odooDefaults.sourceGeneralTaskIndustryField || "x_studio_industry";
-    const generalTaskDomain = [
-      ["project_id", "in", projectIds],
-      ["name", "=", "General"],
-      ["stage_id.name", "=", generalStageName]
-    ];
-    let generalTasks = [];
-    try {
-      generalTasks =
-        (await odoo.searchRead(
-          "project.task",
-          generalTaskDomain,
-          ["id", "project_id", config.odooDefaults.sourceGeneralTaskDbField, industryField],
-          { limit: projectIds.length * 5 }
-        )) || [];
-    } catch (fieldErr) {
-      if (String(fieldErr?.message || fieldErr).includes("Invalid field")) {
-        generalTasks =
-          (await odoo.searchRead(
-            "project.task",
-            generalTaskDomain,
-            ["id", "project_id", config.odooDefaults.sourceGeneralTaskDbField],
-            { limit: projectIds.length * 5 }
-          )) || [];
-      } else throw fieldErr;
-    }
-    const rawDbByProject = new Map();
-    const rawIndustryByProject = new Map();
-    for (const t of generalTasks) {
-      const pid = Array.isArray(t.project_id) ? Number(t.project_id[0]) : null;
-      if (!pid) continue;
-      if (!rawDbByProject.has(pid)) {
-        rawDbByProject.set(pid, t[config.odooDefaults.sourceGeneralTaskDbField]);
-      }
-      if (industryField in t) {
-        const iv = t[industryField];
-        const industry = iv ? (Array.isArray(iv) ? String(iv[1] || iv[0] || "").trim() : String(iv || "").trim()) : "";
-        if (industry && !rawIndustryByProject.has(pid)) rawIndustryByProject.set(pid, industry);
-      }
-    }
-    const map = new Map();
-    for (const pid of projectIds) {
-      const parsed = parseAcctDb(rawDbByProject.get(pid));
-      const industry = rawIndustryByProject.get(pid) || "";
-      if (parsed.target_base_url || industry) {
-        map.set(pid, { ...parsed, industry });
-      }
-    }
-    logger.info("Refreshed target_base_url/target_db/industry from SOURCE General task.", { projects: map.size, projectIds });
-    return map;
-  } catch (err) {
-    logger.warn("Source Odoo refresh failed (continuing with sheet values).", { error: err?.message || String(err) });
-    return null;
-  }
-}
-
-function isEnabledRow(row) {
-  const x = String(row.enabled || "").trim().toLowerCase();
-  return x === "true" || x === "1" || x === "yes" || x === "y";
-}
-
-function ensureAutoColumns(headers, rows) {
-  const wanted = [
-    "purchase_journal_id",
-    "ap_folder_id",
-    "industry"
-  ];
-  let changed = false;
-  for (const c of wanted) {
-    if (!headers.includes(c)) {
-      headers.push(c);
-      changed = true;
-    }
-  }
-  if (changed) {
-    for (const r of rows) {
-      for (const c of wanted) {
-        if (r[c] == null) r[c] = "";
-      }
-    }
-  }
-  return changed;
-}
-
-function groupRowsByTarget(rows) {
-  const groups = new Map();
-  for (const row of rows) {
-    if (!isEnabledRow(row)) continue;
-    const baseUrl = normalizeOdooBaseUrl(row.target_base_url);
-    const db = String(row.target_db || "").trim() || deriveDbFromBaseUrl(baseUrl);
-    const login = String(row.target_login || "").trim();
-    const password = String(row.target_password || "").trim();
-    const companyId = Number(String(row.target_company_id || "").trim() || 0);
-    if (!baseUrl || !db || !login || !password || !companyId) continue;
-    const key = [baseUrl, db, login.toLowerCase(), String(companyId)].join("|");
-    if (!groups.has(key)) {
-      groups.set(key, {
-        cfg: { baseUrl, db, login, password },
-        companyId,
-        rows: []
-      });
-    }
-    groups.get(key).rows.push(row);
-  }
-  return groups;
-}
 
 function pickTopTaxByScore(arr, scorer) {
   let best = null;
@@ -378,86 +222,6 @@ async function resolvePurchaseJournalId(odoo, companyId) {
   return Number((notReceipt || journals[0]).id);
 }
 
-async function refreshRoutingAutoFields(headers, rows, logger, sourceMap = null) {
-  ensureAutoColumns(headers, rows);
-  const groups = groupRowsByTarget(rows);
-  let updated = 0;
-  for (const [key, g] of groups.entries()) {
-    try {
-      const odoo = new OdooClient(g.cfg);
-
-      let journalId = 0;
-      try { journalId = await resolvePurchaseJournalId(odoo, g.companyId); } catch (_) {}
-
-      let apFolderId = 0;
-      try {
-        const parentName = String(g.rows[0]?.ap_folder_parent ?? "").trim() || undefined;
-        const r = await resolveApFolderId(odoo, g.companyId, { parentFolderName: parentName });
-        apFolderId = r?.apFolderId ?? 0;
-      } catch (_) {}
-
-      for (const row of g.rows) {
-        const pid = Number(row.source_project_id || 0);
-        const industryVal = sourceMap?.get(pid)?.industry ?? "";
-        if (industryVal) {
-          logger.info("Industry from General task (source only).", { projectId: pid, industry: industryVal });
-        }
-        const before = [
-          String(row.purchase_journal_id || "").trim(),
-          String(row.ap_folder_id || "").trim(),
-          String(row.industry || "").trim()
-        ].join("|");
-
-        if (journalId) row.purchase_journal_id = String(journalId);
-        if (apFolderId) row.ap_folder_id = String(apFolderId);
-        if (industryVal) row.industry = industryVal;
-
-        const after = [
-          String(row.purchase_journal_id || "").trim(),
-          String(row.ap_folder_id || "").trim(),
-          String(row.industry || "").trim()
-        ].join("|");
-        if (after !== before) updated += 1;
-      }
-    } catch (err) {
-      logger.warn("Auto-field refresh failed for routing group.", { key, error: err?.message || String(err) });
-    }
-  }
-  return { updated, groupCount: groups.size };
-}
-
-async function getRoutingRows(logger) {
-  if (config.routing.source === "odoo") return [];
-  const { headers, rows } = await loadRoutingSheetData(config);
-    const sourceMap = await getSourceOdooTargetMap(logger, rows);
-  if (sourceMap && sourceMap.size > 0) {
-    for (const row of rows) {
-      const pid = Number(row.source_project_id || 0);
-      if (pid && sourceMap.has(pid)) {
-        const r = sourceMap.get(pid);
-        if (!normalizeOdooBaseUrl(row.target_base_url)) row.target_base_url = r.target_base_url || row.target_base_url;
-        if (!String(row.target_db || "").trim()) row.target_db = r.target_db || row.target_db;
-        if (r.industry && !String(row.industry || "").trim()) row.industry = r.industry;
-      }
-    }
-  }
-
-  const refreshRes = await refreshRoutingAutoFields(headers, rows, logger, sourceMap);
-  await saveRoutingSheetData(config, headers, rows);
-  logger.info("Refreshed auto-fields into ProjectRouting.", refreshRes);
-
-  return rows.map(toRoutingRowStrict).filter(Boolean);
-}
-
-function buildTargetKey(row) {
-  return [
-    normalizeOdooBaseUrl(row.target_base_url),
-    row.target_db,
-    String(row.target_login).toLowerCase(),
-    String(row.target_company_id),
-    String(row.source_project_id ?? "")
-  ].join("|");
-}
 
 function buildTargetKeyFromOdooTask(task, baseUrl, db, login, companyId) {
   return [normalizeOdooBaseUrl(baseUrl), db, String(login).toLowerCase(), String(companyId), String(task.project_id?.[0] ?? task.id)].join("|");
@@ -597,40 +361,8 @@ async function getTargetsFromOdoo(logger) {
   return targets;
 }
 
-/** Returns targets from Odoo (if routing.source===odoo) or from Sheets. */
 async function getTargets(logger) {
-  if (config.routing.source === "odoo") {
-    return getTargetsFromOdoo(logger);
-  }
-  const rows = await getRoutingRows(logger);
-  return groupRoutingRows(rows);
-}
-
-function groupRoutingRows(rows) {
-  const groups = new Map();
-  for (const row of rows) {
-    const key = buildTargetKey(row);
-    if (!groups.has(key)) {
-      groups.set(key, {
-        targetKey: key,
-        sourceProjectId: Number(row.source_project_id || 0) || undefined,
-        targetCfg: {
-          baseUrl: row.target_base_url,
-          db: row.target_db,
-          login: row.target_login,
-          password: row.target_password
-        },
-        companyId: row.target_company_id,
-        apFolderId: row.ap_folder_id || 0,
-        apFolderParent: row.ap_folder_parent || "",
-        purchaseJournalId: row.purchase_journal_id || 0,
-        industry: String(row.industry || "").trim(),
-        country: String(row.country || "").trim(),
-        isTopWithholdingAgent: false
-      });
-    }
-  }
-  return [...groups.values()];
+  return getTargetsFromOdoo(logger);
 }
 
 async function resolveApFolderId(odoo, companyId, opts = {}) {
@@ -1582,43 +1314,6 @@ async function getVendorDefaultAccountId(odoo, companyId, vendorId) {
   return accountId;
 }
 
-let accountMappingCache = null;
-
-async function getAccountMapping() {
-  if (accountMappingCache !== null) return accountMappingCache;
-  try {
-    accountMappingCache = await loadAccountMapping(config);
-  } catch (_) {
-    accountMappingCache = [];
-  }
-  return accountMappingCache;
-}
-
-function lookupAccountMapping(mapping, companyId, category, targetDb) {
-  const cat = String(category || "").trim().toLowerCase();
-  if (!cat) return 0;
-  const db = String(targetDb || "").trim().toLowerCase();
-
-  // Exact match: target_db + company_id + category
-  let match = mapping.find((m) =>
-    m.category === cat &&
-    m.companyId === companyId &&
-    m.targetDb && m.targetDb === db
-  );
-  if (match) return match.accountId;
-
-  // Fallback: company_id + category (no target_db or blank target_db)
-  match = mapping.find((m) =>
-    m.category === cat &&
-    m.companyId === companyId &&
-    !m.targetDb
-  );
-  if (match) return match.accountId;
-
-  // Fallback: category only (global default row with no company_id and no target_db)
-  match = mapping.find((m) => m.category === cat && !m.companyId && !m.targetDb);
-  return match ? match.accountId : 0;
-}
 
 const GENERIC_ACCOUNT_WORDS = new Set([
   "expense", "expenses", "admin", "administrative", "general", "miscellaneous",
@@ -1729,7 +1424,7 @@ function pickBestGeminiAccount(geminiPick, expenseAccounts) {
 
 async function resolveExpenseAccountId({
   odoo, companyId, vendorId, category, suggestedName,
-  geminiPick, expenseAccounts, accountMapping, targetDb,
+  geminiPick, expenseAccounts, targetDb,
   lineDescription, vendorName, targetKey
 }) {
   // Helper: enrich a result with accountCode + accountName from expenseAccounts
@@ -1773,13 +1468,7 @@ async function resolveExpenseAccountId({
     if (vnHint) return withMeta({ accountId: vnHint, source: "vendor_name_hint" });
   }
 
-  // Tier 5: sheet mapping (AccountMapping tab)
-  if (accountMapping?.length) {
-    const mapped = lookupAccountMapping(accountMapping, companyId, category, targetDb);
-    if (mapped) return withMeta({ accountId: mapped, source: "sheet_mapping" });
-  }
-
-  // Tier 6: fuzzy name match using line description + category keywords
+  // Tier 5: fuzzy name match using line description + category keywords
   if (expenseAccounts?.length) {
     const fuzzy = fuzzyMatchAccount(expenseAccounts, suggestedName, category, lineDescription);
     if (fuzzy) return withMeta({ accountId: fuzzy, source: "fuzzy_match" });
@@ -2843,7 +2532,6 @@ async function processOneDocument(args) {
     hasNonGeneric: expenseAccounts.some((a) => !isGenericAccount(a)),
     loadLog: acctLoadLog
   });
-  const accountMapping = await getAccountMapping();
   let geminiAssignments = null;
   try {
     geminiAssignments = await assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch);
@@ -2904,7 +2592,7 @@ async function processOneDocument(args) {
     const resolved = await resolveExpenseAccountId({
       odoo, companyId, vendorId: vendor.id,
       category, suggestedName, geminiPick,
-      expenseAccounts, accountMapping, targetDb: odoo.db,
+      expenseAccounts, targetDb: odoo.db,
       lineDescription: lineDesc, vendorName: vendorNameForHint || vendor.name,
       targetKey
     });
@@ -3580,7 +3268,6 @@ async function listApDocuments({ logger, payload = {} }) {
 function clearPerRunCaches() {
   expenseAccountsCache.clear();
   vendorAccountCache.clear();
-  accountMappingCache = null;
 }
 
 async function runWorker({ logger }) {
@@ -3848,5 +3535,6 @@ module.exports = {
   listApDocuments,
   getRoutingSummary,
   collectFeedback,
-  handleDocumentDelete
+  handleDocumentDelete,
+  getTargetsFromOdoo
 };
