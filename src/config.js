@@ -61,7 +61,8 @@ const config = {
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || "",
     model: process.env.GEMINI_MODEL || "gemini-3-pro-preview",
-    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-pro"
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-pro",
+    visionFirst: process.env.GEMINI_VISION_FIRST !== "false"
   },
   odooDefaults: {
     sourceBaseUrl: process.env.SOURCE_BASE_URL || "",
