@@ -248,7 +248,7 @@ const extractionSchema = {
   ]
 };
 
-function buildPrompt(ocrText) {
+function buildPrompt(ocrText = "") {
   return `Extract a vendor bill/receipt for Accounts Payable.
 Return JSON strictly matching the provided schema (no extra keys).
 All confidence fields must be between 0 and 1.
@@ -403,8 +403,9 @@ VAT-INCLUSIVE PRICE DETECTION (CRITICAL):
 - totals.net_total should ALWAYS be the VAT-exclusive amount (before tax). If only a VAT-inclusive total is shown, compute: net_total = grand_total / 1.12 for vatable invoices.
 - totals.grand_total should be the final amount due (what the buyer actually pays).
 
-OCR TEXT:
-${ocrText || "(no OCR text available)"}
+${ocrText
+  ? `OCR TEXT:\n${ocrText}`
+  : `DOCUMENT SOURCE:\nThe original document is attached as an image/PDF. Read ALL text, numbers, and\nlayout DIRECTLY from the visual document. Pay special attention to:\n- Bold/large/boxed text for totals and key amounts\n- Table structures and column alignment for line items\n- Handwritten vs printed text\n- Header/footer for vendor vs buyer identification`}
 
 LINE ITEM CATEGORIZATION:
 - For each line_items[] entry, set expense_category to the best matching category based on the item description AND vendor context:
@@ -507,7 +508,7 @@ Rules:
 - NEVER default to "other" category if the vendor name gives a clear hint about what they sell.`;
 }
 
-async function extractInvoiceWithGemini(ocrText, config, attachment, userHint = "") {
+async function extractInvoiceWithGemini(config, attachment, userHint = "", ocrText = "") {
   let promptText = buildPrompt(ocrText);
   if (userHint) {
     promptText += `\n\nUSER HINT (CRITICAL - prioritize this info):\n${userHint}`;

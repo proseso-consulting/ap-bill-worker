@@ -2490,12 +2490,24 @@ async function processOneDocument(args) {
     });
   }
 
-  ocrText = await ocrTextForAttachment(att, config, logger);
-  if (!ocrText || ocrText.trim().length < config.scan.ocrMinTextLen) {
-    return { status: "skip", reason: "ocr_too_short" };
+  let extracted;
+  if (config.gemini.visionFirst) {
+    // Vision OCR and Gemini run concurrently — Gemini reads image directly
+    const [ocrResult, geminiResult] = await Promise.allSettled([
+      ocrTextForAttachment(att, config, logger),
+      extractInvoiceWithGemini(config, att, userHint)
+    ]);
+    ocrText = ocrResult.status === "fulfilled" ? (ocrResult.value || "") : "";
+    if (geminiResult.status === "rejected") throw geminiResult.reason;
+    extracted = geminiResult.value;
+  } else {
+    // Legacy: sequential OCR → Gemini with OCR text in prompt
+    ocrText = await ocrTextForAttachment(att, config, logger);
+    if (!ocrText || ocrText.trim().length < config.scan.ocrMinTextLen) {
+      return { status: "skip", reason: "ocr_too_short" };
+    }
+    extracted = await extractInvoiceWithGemini(config, att, userHint, ocrText);
   }
-
-  const extracted = await extractInvoiceWithGemini(ocrText, config, att, userHint);
   fixExtractedAmounts(extracted, ocrText, logger);
   let vendor = await findVendor(odoo, companyId, extracted, ocrText);
   if (!vendor.id) {
