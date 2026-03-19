@@ -1807,7 +1807,9 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
   // Guard: skip if maxOcr supports the large grand_total (OCR also sees it → probably real).
   if (!correctTotal && grandTotal >= 1) {
     const taxTotalK = Number(totals.tax_total || 0);
-    if (taxTotalK > 0) {
+    const exemptAmt = Number(totals.vat_exempt_amount || 0);
+    const zeroRatedAmt = Number(totals.zero_rated_amount || 0);
+    if (taxTotalK > 0 && exemptAmt === 0 && zeroRatedAmt === 0) {
       const impliedGross = Math.round((taxTotalK / 0.12) * 1.12 * 100) / 100;
       if (impliedGross >= 100 && grandTotal > impliedGross * 3 && !(maxOcr >= grandTotal * 0.8)) {
         correctTotal = maxOcr > 0 && maxOcr < grandTotal * 0.8 ? maxOcr : impliedGross;
