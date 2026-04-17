@@ -145,11 +145,24 @@ describe("webhook routes — new /webhook/<type>/:slug form", () => {
     const { app, handlers, read } = makeApp({ odooRows: [{ id: 7 }] });
     const res = await request(app)
       .post("/webhook/chatter-message/proseso-accounting-test")
-      .send({ _id: 7, _model: "mail.message", id: 7 });
+      .send({ _id: 7, _model: "mail.message", id: 7, res_id: 2787 });
 
     expect(res.status).toBe(200);
     expect(handlers.onChatterMessage).toHaveBeenCalledTimes(1);
     expect(read).toHaveBeenCalledWith("mail.message", [["id", "=", 7]], ["id"], { limit: 1 });
+  });
+
+  it("chatter webhook payload maps doc_id from res_id (NOT the message _id)", async () => {
+    const { app, handlers } = makeApp({ odooRows: [{ id: 25617 }] });
+    const res = await request(app)
+      .post("/webhook/chatter-message/proseso-accounting-test")
+      .send({ _id: 25617, _model: "mail.message", id: 25617, res_id: 2787, body: "<p>@bot check</p>" });
+
+    expect(res.status).toBe(200);
+    const call = handlers.onChatterMessage.mock.calls[0][0];
+    expect(call.payload.doc_id).toBe(2787);
+    expect(call.payload.res_id).toBe(2787);
+    expect(call.body._id).toBe(25617);
   });
 
   it("POST /webhook/bs-document-upload/:slug routes to onBsDocumentUpload", async () => {
