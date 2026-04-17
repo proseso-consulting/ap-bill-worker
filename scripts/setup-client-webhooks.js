@@ -87,7 +87,7 @@ const RULE_SPECS = [
 ];
 
 function parseArgs(argv) {
-  const a = { list: false, all: false, slug: null, dryRun: false, force: false, active: true, includeSource: false };
+  const a = { list: false, all: false, slug: null, dryRun: false, force: false, active: true, includeSource: false, installMissingModules: false };
   for (let i = 2; i < argv.length; i++) {
     const v = argv[i];
     if (v === "--list") a.list = true;
@@ -96,11 +96,36 @@ function parseArgs(argv) {
     else if (v === "--force") a.force = true;
     else if (v === "--inactive") a.active = false;
     else if (v === "--include-source") a.includeSource = true;
+    else if (v === "--install-missing-modules") a.installMissingModules = true;
     else if (v === "--slug") a.slug = String(argv[++i] || "").trim();
     else if (v.startsWith("--slug=")) a.slug = v.slice(7).trim();
     else throw new Error(`Unknown arg: ${v}`);
   }
   return a;
+}
+
+async function ensureBaseAutomation(client, { dryRun }) {
+  const existing = await client.searchRead(
+    "ir.module.module",
+    [["name", "=", "base_automation"]],
+    ["id", "state"],
+    { limit: 1 }
+  );
+  if (!existing.length) return { ok: false, error: "base_automation module not found on this instance" };
+  if (existing[0].state === "installed") return { ok: true, already: true };
+  if (dryRun) return { ok: true, wouldInstall: true };
+  try {
+    await client.executeKw("ir.module.module", "button_immediate_install", [[existing[0].id]]);
+  } catch (e) {
+    return { ok: false, error: `install failed: ${e.message}` };
+  }
+  const after = await client.searchRead(
+    "ir.module.module",
+    [["id", "=", existing[0].id]],
+    ["state"],
+    { limit: 1 }
+  );
+  return { ok: after[0]?.state === "installed", installed: true };
 }
 
 function extractSlug(accountingDbUrl) {
@@ -204,9 +229,26 @@ async function installForTenant(task, opts) {
     const needed = ["base.automation", "ir.actions.server", "documents.document", "mail.message"];
     const rows = await client.searchRead("ir.model", [["model", "in", needed]], ["model"], { limit: 10 });
     const got = new Set(rows.map((r) => r.model));
-    const missing = needed.filter((m) => !got.has(m));
+    let missing = needed.filter((m) => !got.has(m));
+
+    // base.automation comes from the base_automation module. On Odoo SaaS that
+    // module is uninstalled by default — auto-install it when asked.
+    if (missing.includes("base.automation") && opts.installMissingModules) {
+      const r = await ensureBaseAutomation(client, { dryRun });
+      if (r.ok) {
+        result.moduleActions = result.moduleActions || [];
+        if (r.installed) result.moduleActions.push("installed base_automation");
+        else if (r.wouldInstall) result.moduleActions.push("would install base_automation");
+        missing = missing.filter((m) => m !== "base.automation");
+      } else {
+        result.errors.push(`base_automation: ${r.error}`);
+        return result;
+      }
+    }
+
     if (missing.length) {
-      result.errors.push(`unsupported odoo version — missing models: ${missing.join(", ")}`);
+      const hint = missing.includes("base.automation") ? " (pass --install-missing-modules to auto-install base_automation)" : "";
+      result.errors.push(`missing required models: ${missing.join(", ")}${hint}`);
       return result;
     }
   } catch (e) {
@@ -303,6 +345,7 @@ function formatReport(results, opts) {
   for (const r of results) {
     const issues = r.errors.length ? `  ERR: ${r.errors.length}` : "";
     console.log(`\n[${r.slug}]  ${r.project}${issues}`);
+    if (r.moduleActions?.length) console.log(`  modules:  ${r.moduleActions.join(", ")}`);
     if (r.created.length)  console.log(`  created:  ${r.created.map((c) => c.name).join(", ")}`);
     if (r.skipped.length)  console.log(`  skipped:  ${r.skipped.join(", ")}  (already exist; use --force to recreate)`);
     if (r.deleted.length)  console.log(`  deleted:  ${r.deleted.join(", ")}`);
