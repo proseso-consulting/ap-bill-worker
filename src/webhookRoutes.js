@@ -3,7 +3,15 @@ const { createRateLimiter } = require("./rateLimiter");
 
 function normalizePayload(body, targetKey) {
   const src = body || {};
-  const docId = Number(src._id || src.id || src.doc_id || src.document_id || 0);
+  const model = String(src._model || src.model || "").trim();
+  // For chatter webhooks the webhook body's _id is the mail.message id.
+  // The DOCUMENT id (what handlers need) lives on mail.message.res_id.
+  let docId;
+  if (model === "mail.message") {
+    docId = Number(src.res_id || src.doc_id || src.document_id || 0);
+  } else {
+    docId = Number(src._id || src.id || src.doc_id || src.document_id || 0);
+  }
   return {
     ...src,
     doc_id: docId,
