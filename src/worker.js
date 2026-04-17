@@ -23,6 +23,7 @@ const {
   appendMarker,
   parseOcrJobMarker
 } = require("./markers");
+const { stripExampleContext } = require("./ocrFilters");
 
 function outOfTime(startMs) {
   return Date.now() - startMs > config.budget.runBudgetMs - config.budget.reserveMs;
@@ -1570,7 +1571,14 @@ function extractOcrAmounts(ocrText) {
 
 function isTotalLikeLabel(label) {
   const l = String(label || "").toLowerCase();
-  const excludePatterns = ["line_item", "line item", "unit_price", "unit price", "vat_amount", "vat amount", "tax_amount", "tax amount", "exempt", "zero_rated"];
+  const excludePatterns = [
+    "line_item", "line item", "unit_price", "unit price",
+    "vat_amount", "vat amount", "tax_amount", "tax amount",
+    "exempt", "zero_rated",
+    // Don't let illustrative / T&C labels match grand-total logic.
+    "example", "e.g.", "for instance", "sample", "illustration",
+    "net payable", "net_payable"
+  ];
   if (excludePatterns.some((p) => l.includes(p))) return false;
   return l.includes("total") || l.includes("grand") || l.includes("due") || l.includes("amount due") || l.includes("amount_due") || l === "amount" || l.includes("subtotal");
 }
@@ -1582,8 +1590,13 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
   const lineItems = extracted?.line_items || [];
   const candidates = (extracted?.amount_candidates || [])
     .map((c) => ({ amount: Number(c.amount || 0), confidence: Number(c.confidence || 0), label: String(c.label || "").toLowerCase() }))
-    .filter((c) => c.amount >= 10);
-  const ocrAmounts = extractOcrAmounts(ocrText);
+    .filter((c) => c.amount >= 10)
+    // Drop candidates whose label marks them as illustrative (Net Payable, Example, etc).
+    .filter((c) => !/(example|e\.g\.|for instance|sample|illustration|net[ _]payable)/i.test(c.label));
+  // Strip example/T&C text from OCR before harvesting amounts — these sections
+  // often contain figures like "Net Payable ₱110,000" that aren't the real total.
+  const cleanedOcr = stripExampleContext(ocrText);
+  const ocrAmounts = extractOcrAmounts(cleanedOcr);
 
   let correctTotal = 0;
 
@@ -1819,6 +1832,35 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
         if (logger) logger.info("Amount correction: grand_total implausibly large vs tax_total (hallucinated total).", {
           geminiTotal: grandTotal, taxTotalK, impliedGross, maxOcr, corrected: correctTotal
         });
+      }
+    }
+  }
+
+  // Case V: VAT-rate sanity check.
+  // If the bill is declared vatable and tax_total is clearly a 12% slice of some
+  // net (matching vatable_base), but grand_total implies a far-off VAT rate,
+  // the grand_total is wrong. Picks a candidate whose amount makes the VAT rate
+  // consistent. Catches the Proseso invoice footer bug where "Net Payable
+  // ₱110,000" from a Withholding Tax Note example was picked up as the total,
+  // while the real VAT (1,440) came from the actual line item (12,000 base).
+  if (!correctTotal && grandTotal >= 1) {
+    const vatClass = String(extracted?.vat?.classification || "").toLowerCase();
+    const taxTotalV = Number(totals.tax_total || 0);
+    const vatBase = Number(extracted?.vat?.vatable_base || 0);
+    if (vatClass === "vatable" && taxTotalV > 0 && vatBase > 0) {
+      // Verify tax_total is genuinely 12% of vatable_base (within 2%). If so,
+      // the pair (base, tax) is trustworthy and grand_total should be base+tax.
+      const baseTaxRatio = taxTotalV / vatBase;
+      const baseTaxConsistent = Math.abs(baseTaxRatio - 0.12) < 0.02;
+      if (baseTaxConsistent) {
+        const expectedTotal = Math.round((vatBase + taxTotalV) * 100) / 100;
+        const drift = Math.abs(grandTotal - expectedTotal) / expectedTotal;
+        if (drift > 0.2 && grandTotal > expectedTotal * 1.5) {
+          correctTotal = expectedTotal;
+          if (logger) logger.info("Amount correction: VAT rate sanity (Case V).", {
+            geminiTotal: grandTotal, vatBase, taxTotal: taxTotalV, expectedTotal, drift: drift.toFixed(2)
+          });
+        }
       }
     }
   }
