@@ -253,6 +253,36 @@ function buildPrompt(ocrText = "") {
 Return JSON strictly matching the provided schema (no extra keys).
 All confidence fields must be between 0 and 1.
 
+IGNORE EXAMPLE / TERMS / PROVISIONS TEXT (CRITICAL — READ FIRST):
+- Many PH invoices include illustrative calculations in footers, terms, or
+  withholding-tax notes. These are NOT the real invoice amounts. You must
+  IGNORE any numbers that appear inside:
+  - A sentence that begins with "Example:", "For instance", "e.g.", "Sample:",
+    "Illustration:", "such as", "To illustrate:".
+  - A paragraph under any of these section headers: "Withholding Tax Note",
+    "General Terms and Conditions", "Terms and Conditions", "Additional terms",
+    "Confidentiality", "Limitations of scope", "Client responsibilities",
+    "Selected Services Terms", "Payment terms" (when just an explanation).
+  - A computed figure like "Net Payable ₱110,000" that follows an "Example:"
+    sentence or appears inside a WHT / EWT explanation.
+- The REAL invoice amounts come from: the line items table, the totals block
+  near the bottom of page 1 (Untaxed Amount / VATable / VAT / Total / Amount
+  Due / Grand Total), and the payment details (Bank / Account / Payable To).
+- If in doubt, trust the amount labeled "Total" or "Amount Due" in the totals
+  block on page 1 over any example figure anywhere else in the document.
+- SPECIFIC TRAP (Proseso invoice template): The footer has a "Withholding Tax
+  Note" with text like "Example: Service Fee ₱100,000 + 12% VAT ₱12,000 -
+  2% EWT ₱2,000 = Net Payable ₱110,000". Do NOT extract those numbers. They
+  describe how WHT works in general, not this specific invoice.
+
+MULTI-PAGE DOCUMENTS:
+- If the PDF has multiple pages and later pages are "Page 2 / 4", "Page 3 / 4",
+  etc. containing only Terms / Conditions / Provisions / Service Descriptions,
+  extract amounts EXCLUSIVELY from page 1. Later pages are the contract, not
+  the bill. Exception: a genuinely long multi-page invoice with line items
+  continuing across pages (no "Example:" or "Terms" headers) — then extract
+  from all pages.
+
 CRITICAL PH RECEIPT RULES:
 - The "ATP / BIR Permit / Printer's Accreditation / Printer info" box is NOT the vendor.
 - Ignore names near keywords: "ATP", "BIR Permit", "Printer", "Accreditation", "Date issued", "O.R. No.", "VAT Reg. TIN" when those appear inside printer/ATP blocks.
@@ -292,6 +322,7 @@ AMOUNT INTEGRITY RULES (CRITICAL):
 - DECIMAL POINT DETECTION: Handwritten decimal points are easy to miss. If a number like "80177" appears where you would expect ~8017.7, it's likely "8017.7" with a missed decimal.
 - CRITICAL: grand_total must NEVER be a VAT/tax component. "VAT Amount: 428.57" or "Tax: 428.57" means the TAX is 428.57, NOT the total. The grand_total is the FINAL amount due (typically vatable_sales + vat_amount, or "Total Amount Due"). If grand_total ≈ tax_total, you picked the WRONG number.
 - If tax_total > grand_total, you definitely have the wrong grand_total (tax cannot exceed total). Re-examine the document.
+- VAT RATE SANITY: On a vatable PH invoice, vat_amount / (grand_total - vat_amount) MUST be close to 0.12 (i.e. 12%). If your extracted numbers give a ratio far from 0.12 (e.g. 0.013 or 0.30), you mixed up an illustration amount with a real line amount. Re-check which numbers came from the actual totals block vs. from examples in T&C.
 - EXTRACT ALL LINE ITEMS: Do NOT skip items. If the invoice lists 10 products, extract all 10. The sum of line item amounts should approximately equal the grand_total. If you only found one line item but the invoice clearly has more, re-examine carefully — especially if there is a PDF/image attached.
 
 HANDWRITTEN / LOW-QUALITY OCR RULES:
