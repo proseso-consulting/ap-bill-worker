@@ -2610,7 +2610,10 @@ async function processOneDocument(args) {
         logger.info("Deleting old draft bill for retry.", { docId: doc.id, billId: linkedId });
         try {
           await odoo.executeKw("account.move", "unlink", [[linkedId]], kwWithCompany(companyId));
-          const clearVals = { res_model: false, res_id: false };
+          // Odoo's account.move unlink cascades active=false onto the linked
+          // document (Documents app side-effect), which moves it to trash.
+          // Force active=true so the doc stays visible in the upload folder.
+          const clearVals = { res_model: false, res_id: false, active: true };
           if (await documentsDocumentHasField(odoo, "account_move_id")) clearVals.account_move_id = false;
           if (await documentsDocumentHasField(odoo, "invoice_id")) clearVals.invoice_id = false;
           await odoo.write("documents.document", [Number(doc.id)], clearVals);
@@ -2627,9 +2630,10 @@ async function processOneDocument(args) {
       }
       // force=true with a posted bill: fall through and create a new draft
     } else {
-      // Bill link exists but bill was deleted — clear the stale link
+      // Bill link exists but bill was deleted — clear the stale link.
+      // Force active=true: a prior delete may have cascaded the doc to trash.
       logger.info("Clearing stale bill link from document (bill was deleted).", { docId: doc.id, staleBillId: linkedId });
-      const clearVals = { res_model: false, res_id: false };
+      const clearVals = { res_model: false, res_id: false, active: true };
       if (await documentsDocumentHasField(odoo, "account_move_id")) clearVals.account_move_id = false;
       if (await documentsDocumentHasField(odoo, "invoice_id")) clearVals.invoice_id = false;
       await odoo.write("documents.document", [Number(doc.id)], clearVals);
