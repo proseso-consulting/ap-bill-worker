@@ -120,8 +120,29 @@ describe("createVendorIfMissing — happy path", () => {
     expect(vals.street).toBe("123 Ayala Ave");
     expect(vals.city).toBe("Makati");
     expect(vals.country_id).toBe(PH_COUNTRY_ID);
-    expect(vals.vat).toBe("123456789");
+    expect(vals.vat).toBe("123-456-789-000");
+    expect(vals.branch_code).toBe("000");
     expect(vals.is_company).toBe(true);
+  });
+
+  it("formats VAT as XXX-XXX-XXX-YYY when 12-digit TIN with branch supplied", async () => {
+    const odoo = makeMockOdoo();
+    const extracted = ph_company_extracted({ tin: "123-456-789-005" });
+    const result = await createVendorIfMissing(odoo, 1, extracted, "ocr text", "Philippines");
+
+    expect(result.status).toBe("created");
+    expect(odoo.partnerCreates[0].vat).toBe("123-456-789-005");
+    expect(odoo.partnerCreates[0].branch_code).toBe("005");
+  });
+
+  it("formats VAT as XXX-XXX-XXX-000 when raw 9-digit TIN supplied (no hyphens)", async () => {
+    const odoo = makeMockOdoo();
+    const extracted = ph_company_extracted({ tin: "103303074" });
+    const result = await createVendorIfMissing(odoo, 1, extracted, "ocr text", "Philippines");
+
+    expect(result.status).toBe("created");
+    expect(odoo.partnerCreates[0].vat).toBe("103-303-074-000");
+    expect(odoo.partnerCreates[0].branch_code).toBe("000");
   });
 
   it("creates PH sole prop with first/last name and TIN", async () => {
@@ -391,6 +412,23 @@ describe("createVendorIfMissing — strip-on-error retry (option 3)", () => {
     await expect(
       createVendorIfMissing(odoo, 1, ph_company_extracted(), "", "")
     ).rejects.toThrow(/Database connection lost/);
+  });
+
+  it("routes to needs_confirmation when Odoo PH localization rejects VAT format", async () => {
+    const odoo = makeMockOdoo({
+      createBehavior: () => {
+        throw new Error(
+          "The VAT number [103303074] for partner [MAC TYCOON MARKETING] does not seem to be valid.\n" +
+          "Note: the expected format is 123-456-789-123"
+        );
+      },
+    });
+    const result = await createVendorIfMissing(odoo, 1, ph_company_extracted(), "", "");
+
+    expect(result.status).toBe("needs_confirmation");
+    expect(result.reason).toBe("vat_format_rejected");
+    expect(result.vat).toBe("123-456-789-000");
+    expect(odoo.partnerCreates).toHaveLength(1);
   });
 
   it("retries strip twice on cascading unknown-field errors", async () => {
