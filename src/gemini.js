@@ -648,7 +648,7 @@ const accountAssignmentSchema = {
   required: ["assignments", "bill_level_account_id", "bill_level_account_code", "bill_level_account_name", "bill_level_confidence"]
 };
 
-async function assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch) {
+async function assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch, logger = null) {
   if (!expenseAccounts?.length) return null;
 
   const lineItems = extracted?.line_items || [];
@@ -824,8 +824,7 @@ RULES (MANDATORY - follow ALL):
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: accountAssignmentSchema,
-      maxOutputTokens: 3072
+      responseSchema: accountAssignmentSchema
     }
   };
 
@@ -836,16 +835,32 @@ RULES (MANDATORY - follow ALL):
   if (!result) return null;
 
   const data = safeJsonParse(result.text, {});
+  const candidate = data?.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+  if (finishReason && finishReason !== "STOP" && logger) {
+    logger.warn("Gemini account-assignment finishReason was not STOP — JSON may be truncated.", {
+      model: result.model,
+      finishReason,
+      usage: data?.usageMetadata || null
+    });
+  }
   const raw =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("\n") ||
+    candidate?.content?.parts?.[0]?.text ||
+    candidate?.content?.parts?.map((p) => p.text || "").join("\n") ||
     "{}";
   const parsed = safeJsonParse(raw, null);
-  if (!parsed) return null;
+  if (!parsed) {
+    if (logger) logger.warn("Gemini account-assignment returned unparseable JSON.", {
+      model: result.model,
+      finishReason,
+      rawLen: raw.length
+    });
+    return null;
+  }
   return { ...parsed, _feedbackCount: feedbackList.length };
 }
 
-async function researchVendorWithGemini(vendorName, tradeName, config) {
+async function researchVendorWithGemini(vendorName, tradeName, config, logger = null) {
   const name = String(tradeName || vendorName || "").trim();
   if (!name || name.length < 2) return null;
 
@@ -860,8 +875,7 @@ If the company is not well-known or search returns no useful results, say "No in
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    tools: [{ google_search: {} }],
-    generationConfig: { maxOutputTokens: 512 }
+    tools: [{ google_search: {} }]
   };
 
   try {
@@ -871,9 +885,18 @@ If the company is not well-known or search returns no useful results, say "No in
     });
     if (!result) return null;
     const data = safeJsonParse(result.text, null);
+    const candidate = data?.candidates?.[0];
+    const finishReason = candidate?.finishReason;
+    if (finishReason && finishReason !== "STOP" && logger) {
+      logger.warn("Gemini vendor-research finishReason was not STOP — output may be truncated.", {
+        model: result.model,
+        finishReason,
+        usage: data?.usageMetadata || null
+      });
+    }
     const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join(" ") ||
+      candidate?.content?.parts?.[0]?.text ||
+      candidate?.content?.parts?.map((p) => p.text || "").join(" ") ||
       "";
     const trimmed = text.trim();
     if (!trimmed || trimmed.toLowerCase().startsWith("no information found")) return null;

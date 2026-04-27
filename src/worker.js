@@ -2835,7 +2835,7 @@ async function processOneDocument(args) {
     try {
       const vName = String(extracted?.vendor?.name || vendor.name || "").trim();
       const tName = String(extracted?.vendor_details?.trade_name || "").trim();
-      vendorResearch = await researchVendorWithGemini(vName, tName, config);
+      vendorResearch = await researchVendorWithGemini(vName, tName, config, logger);
       if (vendorResearch) {
         logger.info("Vendor research (Google Search).", { docId: doc.id, vendor: vName, research: vendorResearch });
       }
@@ -2855,7 +2855,7 @@ async function processOneDocument(args) {
   });
   let geminiAssignments = null;
   try {
-    geminiAssignments = await assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch);
+    geminiAssignments = await assignAccountsWithGemini(extracted, expenseAccounts, config, targetKey, industry, ocrText, vendorResearch, logger);
     if (geminiAssignments) {
       logger.info("Gemini Pass 2 account assignments.", {
         docId: doc.id,
