@@ -2734,13 +2734,13 @@ async function processOneDocument(args) {
   let extracted, geminiModel;
   if (config.gemini.skipVision) {
     // Gemini-only mode — no Cloud Vision OCR, Gemini reads image/PDF directly
-    ({ data: extracted, model: geminiModel } = await extractInvoiceWithGemini(config, att, userHint));
+    ({ data: extracted, model: geminiModel } = await extractInvoiceWithGemini(config, att, userHint, "", logger));
     ocrText = "";
   } else if (config.gemini.visionFirst) {
     // Vision OCR and Gemini run concurrently — Gemini reads image directly
     const [ocrResult, geminiResult] = await Promise.allSettled([
       ocrTextForAttachment(att, config, logger),
-      extractInvoiceWithGemini(config, att, userHint)
+      extractInvoiceWithGemini(config, att, userHint, "", logger)
     ]);
     ocrText = ocrResult.status === "fulfilled" ? (ocrResult.value || "") : "";
     if (geminiResult.status === "rejected") throw geminiResult.reason;
@@ -2751,7 +2751,7 @@ async function processOneDocument(args) {
     if (!ocrText || ocrText.trim().length < config.scan.ocrMinTextLen) {
       return { status: "skip", reason: "ocr_too_short" };
     }
-    ({ data: extracted, model: geminiModel } = await extractInvoiceWithGemini(config, att, userHint, ocrText));
+    ({ data: extracted, model: geminiModel } = await extractInvoiceWithGemini(config, att, userHint, ocrText, logger));
   }
   fixExtractedAmounts(extracted, ocrText, logger);
   validateAmountReconciliation(extracted, logger);

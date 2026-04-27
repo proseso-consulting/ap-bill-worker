@@ -549,7 +549,7 @@ Rules:
 - NEVER default to "other" category if the vendor name gives a clear hint about what they sell.`;
 }
 
-async function extractInvoiceWithGemini(config, attachment, userHint = "", ocrText = "") {
+async function extractInvoiceWithGemini(config, attachment, userHint = "", ocrText = "", logger = null) {
   let promptText = buildPrompt(ocrText);
   if (userHint) {
     promptText += `\n\nUSER HINT (CRITICAL - prioritize this info):\n${userHint}`;
@@ -564,24 +564,44 @@ async function extractInvoiceWithGemini(config, attachment, userHint = "", ocrTe
     });
   }
 
+  // No maxOutputTokens cap on extraction. The schema is large (vendor +
+  // candidates + line_items[] + tax buckets + etc.) and a low cap silently
+  // truncates the JSON response — safeJsonParse then returns {} and vendor
+  // comes through blank. Cap caused PR #38's regression on multi-line bills.
   const body = {
     contents: [{ role: "user", parts }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: extractionSchema,
-      maxOutputTokens: 4096
+      responseSchema: extractionSchema
     }
   };
 
   const result = await geminiWithRetryAndFallback(config, body, { throwOnFail: true });
   const data = safeJsonParse(result.text, {});
+  const candidate = data?.candidates?.[0];
+  const finishReason = candidate?.finishReason;
+  if (finishReason && finishReason !== "STOP" && logger) {
+    logger.warn("Gemini extraction finishReason was not STOP — JSON may be truncated.", {
+      model: result.model,
+      finishReason,
+      usage: data?.usageMetadata || null
+    });
+  }
   const raw =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-    data?.candidates?.[0]?.content?.parts?.map((p) => p.text || "").join("\n") ||
+    candidate?.content?.parts?.[0]?.text ||
+    candidate?.content?.parts?.map((p) => p.text || "").join("\n") ||
     "{}";
 
-  const extracted = safeJsonParse(raw, {});
-  if (!extracted || typeof extracted !== "object") return { data: {}, model: result.model };
+  const extracted = safeJsonParse(raw, null);
+  if (!extracted || typeof extracted !== "object") {
+    if (logger) logger.warn("Gemini extraction returned unparseable JSON.", {
+      model: result.model,
+      finishReason,
+      rawLen: raw.length,
+      rawPreview: raw.slice(0, 200)
+    });
+    return { data: {}, model: result.model };
+  }
   return { data: extracted, model: result.model };
 }
 
