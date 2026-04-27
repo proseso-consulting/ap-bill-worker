@@ -3006,7 +3006,7 @@ async function processOneDocument(args) {
     companyId,
     "documents.document",
     doc.id,
-    `✅ <b>🤖 AP Bot:</b> Draft Vendor Bill created: account.move #${billId}<br/>Vendor=${vendor.name || "(unknown)"}<br/>Model=${geminiModel || "unknown"}`
+    `✅ <b>🤖 AP Bot:</b> Draft Vendor Bill created: account.move #${billId}<br/>Vendor=${vendor.name || "(unknown)"}`
   );
 
   {
@@ -3021,7 +3021,14 @@ async function processOneDocument(args) {
       : et === "government_entity" ? "Government Entity"
       : "Unknown";
     const tn = String(vd.trade_name || vendor.tradeName || "").trim();
-    const pn = String(vd.proprietor_name || vendor.proprietorName || "").trim();
+    const rawPn = vd.proprietor_name;
+    let pn = "";
+    if (typeof rawPn === "object" && rawPn !== null) {
+      pn = [rawPn.first_name, rawPn.middle_name, rawPn.last_name].filter(Boolean).join(" ").trim();
+    } else {
+      pn = String(rawPn || "").trim();
+    }
+    if (!pn) pn = String(vendor.proprietorName || "").trim();
     const vendorMsg = [
       `<b>🔍 Vendor extraction</b>`,
       `Name: ${vendor.name || "(unknown)"} | Confidence: ${Number(extracted?.vendor?.confidence || 0).toFixed(2)}`,
@@ -3042,18 +3049,16 @@ async function processOneDocument(args) {
       const acct = acctId ? expenseAccounts.find((a) => a.id === acctId) : null;
       const li = useLines && lineItems[i] ? lineItems[i] : null;
       const desc = li ? String(li.description || "").slice(0, 60) : "Single line";
-      const resolvedSource = lineAccountSources[i] || "";
-      const srcLabel = resolvedSource ? ` <i>(${resolvedSource})</i>` : "";
-      lines.push(`Line ${i + 1}: ${desc} → ${acct ? `<b>${acct.code} ${acct.name}</b>${srcLabel}` : `(account #${acctId || "default"}) <i>(${resolvedSource || "no accounts loaded"})</i>`}`);
+      const rawSource = lineAccountSources[i] || "";
+      const displaySource = rawSource.startsWith("gemini") ? "AI" : rawSource;
+      const srcLabel = displaySource ? ` <i>(${displaySource})</i>` : "";
+      lines.push(`Line ${i + 1}: ${desc} → ${acct ? `<b>${acct.code} ${acct.name}</b>${srcLabel}` : `(account #${acctId || "default"}) <i>(${displaySource || "no accounts loaded"})</i>`}`);
     }
-    const geminiInfo = geminiAssignments
-      ? `Gemini: bill_level=${geminiAssignments.bill_level_account_code || "?"} ${geminiAssignments.bill_level_account_name || "?"}`
-      : "Gemini Pass 2: null";
     const loadStatus = acctLoadLog.length ? acctLoadLog.join("; ") : "no log";
     const vendorResearchLine = vendorResearch ? `🔍 Vendor research: <i>${vendorResearch.slice(0, 300)}</i>` : "";
     const acctMsgParts = [`<b>💡 Account suggestions</b> <i>(${expenseAccounts.length} accounts loaded)</i>`, `<i>${loadStatus}</i>`];
     if (vendorResearchLine) acctMsgParts.push(vendorResearchLine);
-    acctMsgParts.push(geminiInfo, ...lines);
+    acctMsgParts.push(...lines);
     const acctMsg = acctMsgParts.join("<br/>");
     await safeMessagePost(odoo, companyId, "account.move", Number(billId), acctMsg);
   }
