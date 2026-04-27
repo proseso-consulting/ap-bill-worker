@@ -1,81 +1,76 @@
-# Cost estimate (revised against real telemetry, 2026-04-27)
+# Cost estimate (revised, 2026-04-27, post-incident)
 
-This document was rewritten after the 7-day GCP bill came in at **$200**, with $190 of that on Gemini API. The previous version's volume assumption (1,500 files/month) was ~19× too low; the per-file token math was directionally OK but missed Gemini 3 Pro's reasoning/thinking tokens which count as billed output.
+This doc has been rewritten twice. The original assumed 1,500 bills/month at steady state and predicted $55-65/month. The first revision saw a $200/week bill, took the 7,167 Vision OCR calls at face value, and predicted $170-300/month. Both were wrong because **most of the OCR volume was retry waste, not real bills**.
 
-## What we actually saw (last 7 days, billed)
+## What the 7-day $200 bill was actually paying for
 
-| SKU | Service | Usage | Cost |
-|---|---|---|---|
-| Gemini 3 Pro short — output tokens | Gemini API | 13,530,817 | **$162.33** |
-| Cloud Run CPU Tier 2 | Cloud Run | 2,397,243 sec | $42.72 |
-| Gemini 3 Pro short — input tokens | Gemini API | 7,920,123 | $15.71 |
-| Gemini 2.5 Pro short — output (fallback path) | Gemini API | 1,018,088 | $10.18 |
-| Document Text Detection | Cloud Vision | 7,167 calls | $9.25 |
-| Cloud SQL Postgres f1-micro | Cloud SQL | 1,244 hr | $8.05 |
-| Gemini 3 Pro — cached input | Gemini API | 12.7M | $2.52 |
-| Cloud Run min-instance, memory, secrets | (other) | — | ~$8 |
-| **Total billed** | | | **~$200 / 7 days** |
+Real production traffic (last 7 days, by log query):
 
-Annualized projection at this rate: ~$10,400/year if nothing changes.
+| Metric | Count |
+|---|---|
+| Successful bill creations (HTTP 200 webhooks) | **66** (46 klaro-ventures + 20 proseso-test) |
+| Unique doc IDs that reached Gemini extraction | **30** |
+| Vision OCR calls billed | **7,167** |
+| Cron `/run` sweeps | 326 |
+| Webhook 404s (etruscans tenant misconfigured) | 1,703 |
+| Webhook 429s (rate-limited) | 297 |
 
-## What drove the bill
+**OCR calls per unique doc: ~239×.** The seven docs with the most reprocessing were `22, 23, 24, 66, 87, 65, 70` — all on klaro-ventures, all hitting the Odoo PH `check_vat_ph` validator with `does not seem to be valid` because vendor TINs were being written without hyphens. Each cron sweep (every 15 minutes × 14 tenants ≈ 326/week) found these docs as "unprocessed" because bill creation had failed and no marker was written, so Vision + 3 Gemini calls fired again. Multiply 7 docs × ~640 sweeps × 4 API calls = ~17,900 wasted calls — ~99% of the $200.
 
-- **Volume:** 7,167 bills processed in 7 days ≈ ~28k/month — not the 1.5k/month the original doc assumed.
-- **Per-file output tokens:** 13.5M / 7,167 ≈ 1,884 tokens/bill (close to the 1,500 estimate, slightly inflated by Gemini 3 Pro thinking tokens).
-- **Per-file input tokens:** 7.9M / 7,167 ≈ 1,103 tokens/bill (the doc assumed 9,500 — 9× too high; PDFs are passed inline as binary not tokenized text).
-- **Gemini 3 Pro pricing** at the time of measurement: ~$2/M input, ~$12/M output (the latter includes reasoning tokens). 2.5 Pro is ~$1.25/M input, ~$5/M output.
-- **3 Gemini calls per bill on average:** extraction + account assignment + (sometimes) vendor research. Total invocations 13,137 / 7,167 ≈ 1.83 calls/bill.
+**Per real bill: $200 / 66 ≈ $3.03.** Burnt cost-per-output, not steady-state cost-per-bill.
 
-## What changed (PR #38, merged 2026-04-27)
+## What's now in place
 
-- Default model swapped: `gemini-3.1-pro-preview` → **`gemini-2.5-pro`** (primary), **`gemini-2.5-flash`** (fallback). Live and pinned in `cloudbuild.yaml`.
-- `assignAccountsWithGemini` and `researchVendorWithGemini` route through `gemini-2.5-flash` (text-only, no Pro needed).
-- `maxOutputTokens` caps: extraction 4096, assignment 3072, research 512, BS extraction 8192.
-- `researchVendorWithGemini` skipped for vendors matched in Odoo (`vendor.created !== true`).
+| Fix | Effect |
+|---|---|
+| PR #36 (`2ecee83`) — write VAT as `XXX-XXX-XXX-YYY`, route VAT-format errors to `needs_confirmation` | Stops the specific klaro-ventures retry loop at its source |
+| PR #37 (`ca3d34b`) — keep `documents.document.active=true` on retry path | Prevents related cascading-trash retry path |
+| PR #38 (`b07164a`) — `gemini-2.5-pro` primary, `gemini-2.5-flash` for assignment + research, `maxOutputTokens` caps, skip vendor research for matched vendors | ~60% cheaper per Gemini call |
+| PR #39 (`4a6b754`) — `bs-gemini` cap, summarized-receipt VAT bucket split, reconciliation warning | Tightens BS extraction; correctness, not direct cost |
 
-**Expected new run rate** at the same volume:
-- Output tokens: extraction stays on 2.5 Pro (~$5/M output) ≈ $30-50; assignment + research move to Flash (~$0.30/M output) ≈ $1-2.
-- Research calls drop ~60-80% (most vendors are repeats).
-- Cached input: implicit Gemini caching should kick in more reliably on the static prompt prefix.
+## Steady-state projection
 
-**Projected total: $40-70 / 7 days** (down from $200), ~$170-300/month at current volume.
+**Assumption:** real production volume is roughly 10 bills/day across active tenants (~70/week, ~300/month). This number should be confirmed against `documents.document` create counts in Odoo, not against worker logs.
 
-## Cost drivers per file (post-PR-38)
+Per real bill, post-PR-38:
+- 1 Vision Document Text Detection call ≈ $0.0015
+- 1 Gemini extraction (2.5 Pro, ~1,100 in / ~1,500 out) ≈ $0.009
+- 1 Gemini account assignment (2.5 Flash, ~3,000 in / ~500 out) ≈ $0.0006
+- 0–1 Gemini vendor research (2.5 Flash, only when vendor is newly created) ≈ $0.0002
+- ≈ **$0.011/bill**
 
-| Call | Model | Input | Output | Per-call cost (PHP est.) |
+| Real bills/month | Gemini + Vision | Cloud Run | SQL/secrets/other | Total |
 |---|---|---|---|---|
-| Extraction | gemini-2.5-pro | ~1,100 | ~1,500 | ~$0.0089 |
-| Account assignment | gemini-2.5-flash | ~3,000 | ~500 | ~$0.0006 |
-| Vendor research (only when new) | gemini-2.5-flash | ~500 | ~200 | ~$0.0002 |
-| Vision OCR | DOC_TEXT | 1 unit (often) | — | ~$0.0015 |
+| 300 | ~$3 | ~$5 | ~$15 | **~$25** |
+| 1,000 | ~$11 | ~$15 | ~$15 | **~$40** |
+| 5,000 | ~$55 | ~$70 | ~$15 | **~$140** |
+| 28,000 | ~$310 | ~$170 | ~$30 | **~$510** |
 
-Per-file cost ≈ **$0.011** (cents per bill). At 28k bills/month: **~$310/month** for Gemini + Vision. Add Cloud Run (~$170/mo at this concurrency) and SQL/secrets (~$30/mo) → **~$500/month** total at current scale.
+The 28,000 row is what the worker LOOKED like it was processing in the bad week; that row is the ceiling we'd hit if the retry-loop returned.
 
-## Scaling table (post-PR-38)
+## What can blow this estimate up again
 
-| Bills/month | Gemini + Vision (mid) | Cloud Run | Total |
+The `--admin` direction was: **don't add a permanent-failure marker** for docs that fail bill creation. That means any deterministic, persistent failure mode (the way `check_vat_ph` was) will retrigger the same retry loop — different cause, same shape.
+
+Examples that could trigger it:
+- A vendor field constraint added by a future Odoo update or studio rule
+- Currency mismatch on a tenant where the resolved currency is missing
+- Tax-id resolution failing for a new tenant before routing is configured
+- New webhook tenant URLs that 404 (etruscans-style)
+
+Without a "fail once, skip thereafter" marker, the cron sweep is unbounded. Cost can return to $200/week from a single batch of stuck docs.
+
+**Operational mitigations** in lieu of the marker:
+1. GCP billing alert at $50/week and $100/week on `odoo-ocr-487104` (early warning).
+2. Daily check on `gcloud logging read` for `severity>=ERROR` from `ap-bill-ocr-worker` — a single recurring error-fingerprint at >100/day is the loop signal.
+3. When a tenant goes live, smoke-test 1 bill end-to-end before enabling the cron sweep.
+
+## What was wrong with earlier versions of this doc
+
+| | Original | First revision | Now |
 |---|---|---|---|
-| 5,000 | ~$55 | ~$30 | ~$90 |
-| 15,000 | ~$165 | ~$90 | ~$260 |
-| 30,000 | ~$330 | ~$180 | ~$520 |
-| 60,000 | ~$660 | ~$360 | ~$1,040 |
+| Real bills/month | 1,500 | 28,000 (extrapolated from OCR calls) | ~300 (extrapolated from successful bill creations) |
+| Reasoning | Hypothetical scenario | Took OCR calls = unique docs | Tied OCR calls to log-confirmed unique doc IDs |
+| Suggested action | "Switch to gemini-2.5-pro" | "More aggressive caching" | "The model swap is in. The dominant cost was a retry loop. Watch for the loop pattern, not the per-call price." |
 
-Linear in bill count. Concurrency does not change API volume.
-
-## Remaining cost levers (not yet implemented)
-
-1. **Explicit `cachedContent` for the 288-line extraction prompt** — implicit caching only captured ~$2.50 of $16 cached-input opportunity. Explicit caching can lock in 75% off the cached input portion. Estimated savings: ~$10-15/week. Lift: medium (TTL renewal, lifecycle management).
-2. **Gemini Batch API** for non-real-time webhooks — 50% discount, but requires async workflow change.
-3. **PDF page cap tightening** — `PDF_OCR_MAX_PAGES=80` is generous; reducing to 20 would cut Vision cost on outlier docs. Negligible at current Vision spend ($9/wk).
-4. **Bank statement worker** has no current volume; if it ramps, mirror the bill-side optimizations.
-
-## What this doc got wrong before
-
-| | Old doc | Actual |
-|---|---|---|
-| Bills/month assumed | 1,500 | ~28,000 |
-| Per-file input tokens | 9,500 | 1,103 |
-| Total monthly Gemini | $55-60 | ~$760 |
-| Reduction action #1 | "switch to gemini-2.5-pro" | done in PR #38 |
-
-Pricing references: [Gemini API pricing](https://ai.google.dev/gemini-api/docs/pricing), [Cloud Vision pricing](https://cloud.google.com/vision/pricing).
+Pricing references: [Gemini API](https://ai.google.dev/gemini-api/docs/pricing), [Cloud Vision](https://cloud.google.com/vision/pricing), [Cloud Run](https://cloud.google.com/run/pricing).
