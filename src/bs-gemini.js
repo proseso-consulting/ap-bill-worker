@@ -99,7 +99,8 @@ async function extractBankStatementWithGemini(config, attachment, userHint) {
     contents: [{ role: "user", parts }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: bsExtractionSchema
+      responseSchema: bsExtractionSchema,
+      maxOutputTokens: 8192
     }
   };
 
