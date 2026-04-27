@@ -998,19 +998,30 @@ function pickBillLevelTaxIds(taxMap, extracted, vendorCountry) {
   return taxMap.genericId ? [taxMap.genericId] : [];
 }
 
-function pickLineTaxIds(taxMap, lineItem, billGoodsOrServices, vendorCountry, extracted, resolvedAccountName = "") {
+function pickLineTaxIds(taxMap, lineItem, billGoodsOrServices, vendorCountry, extracted, resolvedAccountName = "", resolvedAccountCode = "", resolvedAccountType = "") {
   const vatCode = String(lineItem.vat_code || "").toLowerCase();
   const isCapital = !!(lineItem.is_capital_goods);
   const isImported = !!(lineItem.is_imported);
   const cat = String(lineItem.expense_category || "").toLowerCase();
   const acctName = String(resolvedAccountName || "").toLowerCase();
+  const acctCode = String(resolvedAccountCode || "");
+  const acctType = String(resolvedAccountType || "").toLowerCase();
 
-  // Resolve goods_or_services: line-level > bill-level > account-based inference
+  // Resolve goods_or_services: line-level > bill-level > account-based inference.
+  // Account-based override (CRITICAL): the resolved account is the most reliable
+  // signal of what kind of expense this is. Even if Gemini set the line/bill
+  // goods_or_services to "services", a goods-flavoured account (Inventory,
+  // COGS, Purchases) means the line should map to the goods VAT.
   let gs = String(lineItem.goods_or_services || billGoodsOrServices || "").toLowerCase();
-  // Account names clearly indicate goods (COGS, Purchases, Inventory, etc.)
   const GOODS_ACCT_RE = /\bcogs\b|cost.of.good|cost.of.sale|\bpurchase|\binventor|\bmerchandis|\braw.material|\bsuppli/;
   const SERVICES_ACCT_RE = /\bservice\b|professional.fee|consultanc|legal.fee|\brent\b|repair.*maint|freight|commission/;
-  if (acctName && GOODS_ACCT_RE.test(acctName)) gs = "goods";
+  // Account type from Odoo: asset_current covers Inventory/AR/etc.,
+  // expense_direct_cost covers COGS. Both are unambiguously goods-flavoured.
+  const isGoodsAccountType = acctType === "asset_current" || acctType === "expense_direct_cost";
+  // PH chart-of-accounts code prefix: 11xxxx = current assets, 5xxxxx = COGS.
+  const isGoodsCodePrefix = /^(11|5)/.test(acctCode);
+  if (isGoodsAccountType || isGoodsCodePrefix) gs = "goods";
+  else if (acctName && GOODS_ACCT_RE.test(acctName)) gs = "goods";
   else if (acctName && SERVICES_ACCT_RE.test(acctName) && gs !== "goods") gs = "services";
 
   let isPH = true;
@@ -1395,7 +1406,7 @@ async function loadExpenseAccounts(odoo, companyId) {
       accounts = await odoo.searchRead(
         "account.account",
         attempt.domain,
-        ["id", "code", "name"],
+        ["id", "code", "name", "account_type"],
         kwWithCompany(companyId, { limit: 1000, order: "code asc" })
       );
       if (accounts.length) {
@@ -1413,7 +1424,8 @@ async function loadExpenseAccounts(odoo, companyId) {
   const result = accounts.map((a) => ({
     id: Number(a.id),
     code: String(a.code || ""),
-    name: String(a.name || "")
+    name: String(a.name || ""),
+    accountType: String(a.account_type || "")
   }));
   result._loadLog = errors;
   expenseAccountsCache.set(key, result);
@@ -1555,10 +1567,15 @@ async function resolveExpenseAccountId({
   geminiPick, expenseAccounts, targetDb,
   lineDescription, vendorName, targetKey
 }) {
-  // Helper: enrich a result with accountCode + accountName from expenseAccounts
+  // Helper: enrich a result with accountCode + accountName + accountType from expenseAccounts
   const withMeta = (result) => {
     const acct = expenseAccounts?.find((a) => a.id === result.accountId);
-    return { ...result, accountCode: acct?.code || "", accountName: acct?.name || "" };
+    return {
+      ...result,
+      accountCode: acct?.code || "",
+      accountName: acct?.name || "",
+      accountType: acct?.accountType || ""
+    };
   };
 
   // Tier 1: vendor default (skip if it's a generic account like Admin Expense)
@@ -2166,14 +2183,17 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
 
       let lineTaxIds;
       if (hasPerLineVat && lineVatCode) {
-        lineTaxIds = pickLineTaxIds(taxMap, item, billGs, vendorCountry, extracted, acctMeta.name);
+        lineTaxIds = pickLineTaxIds(taxMap, item, billGs, vendorCountry, extracted, acctMeta.name, acctMeta.code, acctMeta.accountType);
       } else {
         lineTaxIds = billLevelTaxIds;
-        // Refine goods/services discrimination using account name when bill-level assigned a standard vatable tax.
-        // Skip refinement for exempt/zero-rated/capital — those are correct as-is.
+        // Refine goods/services discrimination using account when bill-level
+        // assigned a standard vatable tax. Skip refinement for exempt/zero-rated/capital.
+        // Refinement runs whenever ANY of {name, code, accountType} signal — the
+        // account_type/code-prefix path doesn't need a name to fire.
         const vatableTaxIds = new Set([taxMap.goodsId, taxMap.servicesId, taxMap.genericId].filter(Boolean));
-        if (lineTaxIds.length === 1 && vatableTaxIds.has(lineTaxIds[0]) && acctMeta.name) {
-          const refined = pickLineTaxIds(taxMap, { ...item, vat_code: "vatable" }, billGs, vendorCountry, extracted, acctMeta.name);
+        const hasAccountSignal = !!(acctMeta.name || acctMeta.code || acctMeta.accountType);
+        if (lineTaxIds.length === 1 && vatableTaxIds.has(lineTaxIds[0]) && hasAccountSignal) {
+          const refined = pickLineTaxIds(taxMap, { ...item, vat_code: "vatable" }, billGs, vendorCountry, extracted, acctMeta.name, acctMeta.code, acctMeta.accountType);
           if (refined.length) lineTaxIds = refined;
         }
       }
@@ -2306,13 +2326,14 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
     // acctMeta.category from Gemini account assignment is authoritative; falls back to extraction-time category
     const singleEwtCat = singleAcctMeta.category || singleCat;
     const singleEwtId = pickEwtTaxId(taxMap, singleEwtCat, singleGs, entityFlags, extracted, singleAcctMeta.name, singleAcctMeta.code);
-    // Refine goods/services discrimination using account name (same logic as multi-line path)
+    // Refine goods/services discrimination using account (same logic as multi-line path)
     const singleVatableTaxIds = new Set([taxMap.goodsId, taxMap.servicesId, taxMap.genericId].filter(Boolean));
     let singleTaxIds = [...billLevelTaxIds];
-    if (singleTaxIds.length === 1 && singleVatableTaxIds.has(singleTaxIds[0]) && singleAcctMeta.name) {
+    const singleHasAccountSignal = !!(singleAcctMeta.name || singleAcctMeta.code || singleAcctMeta.accountType);
+    if (singleTaxIds.length === 1 && singleVatableTaxIds.has(singleTaxIds[0]) && singleHasAccountSignal) {
       const singleRefined = pickLineTaxIds(
         taxMap, { vat_code: "vatable", goods_or_services: singleGs }, singleGs,
-        vendorCountry, extracted, singleAcctMeta.name
+        vendorCountry, extracted, singleAcctMeta.name, singleAcctMeta.code, singleAcctMeta.accountType
       );
       if (singleRefined.length) singleTaxIds = singleRefined;
     }
@@ -2953,10 +2974,19 @@ async function processOneDocument(args) {
     });
     lineAccountIds.push(resolved.accountId);
     lineAccountSources.push(resolved.source);
-    lineAccountMeta.push({ code: resolved.accountCode || "", name: resolved.accountName || "", category: geminiPick?.expense_category || "" });
+    lineAccountMeta.push({
+      code: resolved.accountCode || "",
+      name: resolved.accountName || "",
+      accountType: resolved.accountType || "",
+      category: geminiPick?.expense_category || ""
+    });
     logger.info("Account resolved.", {
       docId: doc.id, line: i, category, lineDesc: lineDesc.slice(0, 40),
-      accountId: resolved.accountId, source: resolved.source
+      accountId: resolved.accountId,
+      accountCode: resolved.accountCode || "",
+      accountName: resolved.accountName || "",
+      accountType: resolved.accountType || "",
+      source: resolved.source
     });
   }
 
