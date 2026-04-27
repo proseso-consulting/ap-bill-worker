@@ -776,12 +776,12 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText, defaul
     const rawTin = String(details.tin).trim();
     const cleanTin = rawTin.replace(/\D/g, "");
     if (cleanTin.length >= 9) {
-      vals.vat = cleanTin.slice(0, 9);
-      if (cleanTin.length >= 12) {
-        vals.branch_code = cleanTin.slice(-3);
-      } else {
-        vals.branch_code = "000";
-      }
+      // Odoo PH localization's check_vat_ph requires hyphenated XXX-XXX-XXX[-YYY].
+      // Writing raw digits (e.g. "103303074") fails with "does not seem to be valid".
+      const head = `${cleanTin.slice(0, 3)}-${cleanTin.slice(3, 6)}-${cleanTin.slice(6, 9)}`;
+      const branch = cleanTin.length >= 12 ? cleanTin.slice(9, 12) : "000";
+      vals.vat = `${head}-${branch}`;
+      vals.branch_code = branch;
     } else {
       vals.vat = rawTin;
     }
@@ -876,6 +876,11 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText, defaul
     return await odoo.create("res.partner", currentVals);
   };
 
+  // Odoo PH localization rejects malformed VAT with "does not seem to be valid".
+  // Surface as needs_confirmation so the bill caller routes to human review
+  // instead of failing the whole document run.
+  const isVatFormatError = (msg) => /does not seem to be valid/i.test(msg) && /vat|tax/i.test(msg);
+
   try {
     newId = await tryCreate(vals);
   } catch (e) {
@@ -896,6 +901,17 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText, defaul
       };
     }
 
+    if (isVatFormatError(errMsg)) {
+      return {
+        status: "needs_confirmation",
+        partnerId: 0,
+        created: false,
+        name: rawName,
+        reason: "vat_format_rejected",
+        vat: vals.vat,
+      };
+    }
+
     // Field-doesn't-exist on this DB -> strip and retry once.
     const retryVals = stripUnknownFields(vals, errMsg);
     if (!retryVals) throw e;
@@ -913,6 +929,16 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText, defaul
           name: rawName,
           reason: "canonical_validation_failed",
           missing: canonical2[1].trim(),
+        };
+      }
+      if (isVatFormatError(errMsg2)) {
+        return {
+          status: "needs_confirmation",
+          partnerId: 0,
+          created: false,
+          name: rawName,
+          reason: "vat_format_rejected",
+          vat: retryVals.vat,
         };
       }
       const retryVals2 = stripUnknownFields(retryVals, errMsg2);
