@@ -2797,16 +2797,19 @@ async function processOneDocument(args) {
   const taxMeta = billLevelTaxIds.length ? await getTaxMeta(odoo, companyId, billLevelTaxIds) : taxMap._meta;
 
   // --- Vendor research (Google Search grounding) ---
+  // Skip for known vendors (matched in Odoo, not freshly created) — research is only useful for new/unknown vendors.
   let vendorResearch = null;
-  try {
-    const vName = String(extracted?.vendor?.name || vendor.name || "").trim();
-    const tName = String(extracted?.vendor_details?.trade_name || "").trim();
-    vendorResearch = await researchVendorWithGemini(vName, tName, config);
-    if (vendorResearch) {
-      logger.info("Vendor research (Google Search).", { docId: doc.id, vendor: vName, research: vendorResearch });
+  if (vendor.created === true) {
+    try {
+      const vName = String(extracted?.vendor?.name || vendor.name || "").trim();
+      const tName = String(extracted?.vendor_details?.trade_name || "").trim();
+      vendorResearch = await researchVendorWithGemini(vName, tName, config);
+      if (vendorResearch) {
+        logger.info("Vendor research (Google Search).", { docId: doc.id, vendor: vName, research: vendorResearch });
+      }
+    } catch (err) {
+      logger.warn("Vendor research failed.", { docId: doc.id, error: err?.message || String(err) });
     }
-  } catch (err) {
-    logger.warn("Vendor research failed.", { docId: doc.id, error: err?.message || String(err) });
   }
 
   // --- Account resolution ---

@@ -60,8 +60,9 @@ const config = {
   },
   gemini: {
     apiKey: process.env.GEMINI_API_KEY || "",
-    model: process.env.GEMINI_MODEL || "gemini-3-pro-preview",
-    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-pro",
+    model: process.env.GEMINI_MODEL || "gemini-2.5-pro",
+    fallbackModel: process.env.GEMINI_FALLBACK_MODEL || "gemini-2.5-flash",
+    cheapModel: process.env.GEMINI_CHEAP_MODEL || "gemini-2.5-flash",
     visionFirst: process.env.GEMINI_VISION_FIRST !== "false",
     skipVision: process.env.SKIP_VISION_OCR === "true"
   },
