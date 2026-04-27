@@ -20,8 +20,8 @@ async function geminiRequest(model, apiKey, body) {
   return { resp, text };
 }
 
-async function geminiWithRetryAndFallback(config, body, { throwOnFail = true } = {}) {
-  const primary = config.gemini.model;
+async function geminiWithRetryAndFallback(config, body, { throwOnFail = true, model = null } = {}) {
+  const primary = model || config.gemini.model;
   const fallback = config.gemini.fallbackModel || "";
   const models = fallback && fallback !== primary ? [primary, fallback] : [primary];
   let lastError = null;
@@ -558,7 +558,8 @@ async function extractInvoiceWithGemini(config, attachment, userHint = "", ocrTe
     contents: [{ role: "user", parts }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: extractionSchema
+      responseSchema: extractionSchema,
+      maxOutputTokens: 4096
     }
   };
 
@@ -793,11 +794,15 @@ RULES (MANDATORY - follow ALL):
     contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: {
       responseMimeType: "application/json",
-      responseSchema: accountAssignmentSchema
+      responseSchema: accountAssignmentSchema,
+      maxOutputTokens: 3072
     }
   };
 
-  const result = await geminiWithRetryAndFallback(config, body, { throwOnFail: false });
+  const result = await geminiWithRetryAndFallback(config, body, {
+    throwOnFail: false,
+    model: config.gemini.cheapModel
+  });
   if (!result) return null;
 
   const data = safeJsonParse(result.text, {});
@@ -825,11 +830,15 @@ If the company is not well-known or search returns no useful results, say "No in
 
   const body = {
     contents: [{ role: "user", parts: [{ text: prompt }] }],
-    tools: [{ google_search: {} }]
+    tools: [{ google_search: {} }],
+    generationConfig: { maxOutputTokens: 512 }
   };
 
   try {
-    const result = await geminiWithRetryAndFallback(config, body, { throwOnFail: false });
+    const result = await geminiWithRetryAndFallback(config, body, {
+      throwOnFail: false,
+      model: config.gemini.cheapModel
+    });
     if (!result) return null;
     const data = safeJsonParse(result.text, null);
     const text =
