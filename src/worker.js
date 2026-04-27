@@ -2009,6 +2009,37 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
   }
 }
 
+function validateAmountReconciliation(extracted, logger) {
+  const totals = extracted?.totals;
+  if (!totals) return;
+  const grandTotal = Number(totals.grand_total || 0);
+  if (grandTotal < 1) return;
+
+  const vatBase = Number(extracted?.vat?.vatable_base || 0);
+  const vatAmt = Number(extracted?.vat?.vat_amount || 0);
+  const zeroRated = Number(totals.zero_rated_amount || extracted?.vat?.zero_rated_amount || 0);
+  const exempt = Number(totals.vat_exempt_amount || extracted?.vat?.exempt_amount || 0);
+
+  // Only run when at least two of {vatable_base, zero_rated, exempt} are present —
+  // otherwise there's nothing to cross-check (single-bucket invoices are handled by
+  // existing grand_total correction cases in fixExtractedAmounts).
+  const populatedBuckets = [vatBase, zeroRated, exempt].filter((x) => x > 0).length;
+  if (populatedBuckets < 2) return;
+
+  const componentSum = Math.round((vatBase + vatAmt + zeroRated + exempt) * 100) / 100;
+  const diff = Math.abs(componentSum - grandTotal);
+  // Tolerance: ₱1 absolute or 0.5% of grand_total, whichever is larger (covers PH peso rounding).
+  const tolerance = Math.max(1, grandTotal * 0.005);
+  if (diff <= tolerance) return;
+
+  const msg = `Amounts do not reconcile: VATable ${vatBase.toFixed(2)} + VAT ${vatAmt.toFixed(2)} + zero-rated ${zeroRated.toFixed(2)} + exempt ${exempt.toFixed(2)} = ${componentSum.toFixed(2)}, but grand total = ${grandTotal.toFixed(2)} (off by ${diff.toFixed(2)}). Verify the receipt before posting.`;
+  if (!Array.isArray(extracted.warnings)) extracted.warnings = [];
+  extracted.warnings.push(msg);
+  if (logger) logger.warn("Bill amounts do not reconcile to grand total.", {
+    grandTotal, vatBase, vatAmt, zeroRated, exempt, componentSum, diff: Number(diff.toFixed(2))
+  });
+}
+
 const VENDOR_NAME_ACCOUNT_KEYWORDS = {
   fabric: ["supplies", "raw materials", "inventory", "cost of sales", "cost of goods"],
   "fabric trading": ["supplies", "raw materials", "inventory", "cost of sales", "cost of goods"],
@@ -2723,6 +2754,7 @@ async function processOneDocument(args) {
     ({ data: extracted, model: geminiModel } = await extractInvoiceWithGemini(config, att, userHint, ocrText));
   }
   fixExtractedAmounts(extracted, ocrText, logger);
+  validateAmountReconciliation(extracted, logger);
   let vendor = await findVendor(odoo, companyId, extracted, ocrText);
   if (!vendor.id) {
     const createdVendor = await createVendorIfMissing(odoo, companyId, extracted, ocrText, entityFlags?.country || "");

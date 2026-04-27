@@ -395,6 +395,16 @@ PER-LINE VAT (CRITICAL — different lines may have different VAT treatment):
 - IMPORTANT: An invoice can have MIXED VAT treatment. For example, a reimbursement line with NO VAT and a service fee line WITH 12% VAT. Each line must have its own vat_code.
 - Do NOT assume all lines have the same VAT treatment. Read the taxes column for each line carefully.
 
+SUMMARIZED / SUPERMARKET RECEIPTS — SPLIT BY VAT BUCKET (CRITICAL):
+- Some receipts (supermarkets, restaurants, retail SIs with BIR totals block) do NOT itemize each product. Instead they show only aggregate amounts per VAT class in a totals block: "VATable Sales", "Zero-Rated Sales", "VAT-Exempt Sales", "VAT Amount", "Total Payable".
+- When the items are NOT individually itemized, emit ONE line_item per non-zero VAT bucket — never lump them into a single line:
+  - { description: "VATable items", amount = vatable_base, vat_code: "vatable" }
+  - { description: "Zero-rated items", amount = zero_rated_amount, vat_code: "zero_rated" }
+  - { description: "VAT-exempt items", amount = vat_exempt_amount, vat_code: "exempt" }
+  Skip any bucket whose amount is 0.
+- Do NOT collapse zero-rated or VAT-exempt amounts into a "vatable" line — that over-applies 12% VAT on amounts that should not be taxed.
+- When items ARE individually itemized (each product on its own row with its own price), keep one line per item and classify each line's vat_code from the taxes column. Do not aggregate.
+
 PER-LINE GOODS vs SERVICES (CRITICAL for correct PH tax scope):
 - For EACH line_item, set goods_or_services:
   - "goods" for physical products, supplies, inventory, raw materials, fuel, food items
