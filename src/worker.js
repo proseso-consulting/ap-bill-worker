@@ -26,6 +26,23 @@ const {
 const { stripExampleContext } = require("./ocrFilters");
 const { createVendorWithPlaceholderTin } = require("./placeholderTin");
 
+// Gemini schema declares vendor_details.proprietor_name as a required object
+// {first_name, middle_name, last_name}. For Corporation/Government/etc. vendors
+// the model returns the object with all-empty fields, not null. Naive
+// String(obj || "") produces "[object Object]". Normalize to the joined name
+// or "" if no parts are populated. Accepts string, object, undefined, null.
+function normalizeProprietorName(raw) {
+  if (raw == null) return "";
+  if (typeof raw === "string") return raw.trim();
+  if (typeof raw === "object") {
+    const parts = [raw.first_name, raw.middle_name, raw.last_name]
+      .filter((p) => typeof p === "string" && p.trim())
+      .map((p) => p.trim());
+    return parts.join(" ");
+  }
+  return "";
+}
+
 function outOfTime(startMs) {
   return Date.now() - startMs > config.budget.runBudgetMs - config.budget.reserveMs;
 }
@@ -652,13 +669,7 @@ async function findVendor(odoo, companyId, extracted, ocrText) {
 
   const details = extracted?.vendor_details || {};
   const tradeName = String(details.trade_name || "").trim();
-  const proprietorObj = typeof details.proprietor_name === "object" && details.proprietor_name !== null ? details.proprietor_name : {};
-  let proprietorName = "";
-  if (proprietorObj.first_name || proprietorObj.middle_name || proprietorObj.last_name) {
-     proprietorName = [proprietorObj.first_name, proprietorObj.middle_name, proprietorObj.last_name].filter(Boolean).join(" ");
-  } else {
-     proprietorName = String(details.proprietor_name || "").trim();
-  }
+  const proprietorName = normalizeProprietorName(details.proprietor_name);
 
   const searchNames = [vendorName];
   if (tradeName && tradeName.toLowerCase() !== vendorName.toLowerCase()) searchNames.push(tradeName);
@@ -709,12 +720,7 @@ async function createVendorIfMissing(odoo, companyId, extracted, ocrText, defaul
   const isSoleProp = entityType === "sole_proprietor" || entityType === "individual";
   const tradeName = String(details.trade_name || "").trim();
   
-  let proprietorName = "";
-  if (typeof details.proprietor_name === "object" && details.proprietor_name !== null) {
-    proprietorName = [details.proprietor_name.first_name, details.proprietor_name.middle_name, details.proprietor_name.last_name].filter(Boolean).join(" ");
-  } else {
-    proprietorName = String(details.proprietor_name || "").trim();
-  }
+  const proprietorName = normalizeProprietorName(details.proprietor_name);
 
   const name = isSoleProp && tradeName ? tradeName : (proprietorName || rawName);
 
@@ -3049,14 +3055,7 @@ async function processOneDocument(args) {
       : et === "government_entity" ? "Government Entity"
       : "Unknown";
     const tn = String(vd.trade_name || vendor.tradeName || "").trim();
-    const rawPn = vd.proprietor_name;
-    let pn = "";
-    if (typeof rawPn === "object" && rawPn !== null) {
-      pn = [rawPn.first_name, rawPn.middle_name, rawPn.last_name].filter(Boolean).join(" ").trim();
-    } else {
-      pn = String(rawPn || "").trim();
-    }
-    if (!pn) pn = String(vendor.proprietorName || "").trim();
+    const pn = normalizeProprietorName(vd.proprietor_name) || normalizeProprietorName(vendor.proprietorName);
     const vendorMsg = [
       `<b>🔍 Vendor extraction</b>`,
       `Name: ${vendor.name || "(unknown)"} | Confidence: ${Number(extracted?.vendor?.confidence || 0).toFixed(2)}`,
