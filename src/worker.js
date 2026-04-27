@@ -2009,7 +2009,7 @@ function fixExtractedAmounts(extracted, ocrText, logger) {
   }
 }
 
-function validateAmountReconciliation(extracted, logger) {
+function validateAmountReconciliation(extracted, ocrText, logger) {
   const totals = extracted?.totals;
   if (!totals) return;
   const grandTotal = Number(totals.grand_total || 0);
@@ -2020,10 +2020,39 @@ function validateAmountReconciliation(extracted, logger) {
   const zeroRated = Number(totals.zero_rated_amount || extracted?.vat?.zero_rated_amount || 0);
   const exempt = Number(totals.vat_exempt_amount || extracted?.vat?.exempt_amount || 0);
 
-  // Only run when at least two of {vatable_base, zero_rated, exempt} are present —
-  // otherwise there's nothing to cross-check (single-bucket invoices are handled by
-  // existing grand_total correction cases in fixExtractedAmounts).
+  if (!Array.isArray(extracted.warnings)) extracted.warnings = [];
+
+  // Hidden-bucket check: when only the vatable bucket is populated but the
+  // receipt visibly printed "Zero-Rated Sales" / "VAT Exempt" labels, the
+  // model likely collapsed buckets that should have been split.
+  // Detected by clean 12% math (vatBase ≈ grand_total / 1.12) plus label
+  // presence in OCR text OR in amount_candidates labels (covers
+  // vision-direct mode where ocrText is empty).
   const populatedBuckets = [vatBase, zeroRated, exempt].filter((x) => x > 0).length;
+  if (populatedBuckets === 1 && vatBase > 0) {
+    const candidateLabels = (extracted?.amount_candidates || [])
+      .map((c) => String(c?.label || ""))
+      .join(" ");
+    const haystack = `${ocrText || ""} ${candidateLabels}`;
+    const zeroLabel = /zero[\s-]*rated/i.test(haystack);
+    const exemptLabel = /vat[\s-]*exempt|exempt[\s-]*sales/i.test(haystack);
+    if (zeroLabel || exemptLabel) {
+      const impliedNet = grandTotal / 1.12;
+      const tightMath = Math.abs(impliedNet - vatBase) / Math.max(vatBase, 1) < 0.005;
+      if (tightMath) {
+        const labels = [zeroLabel ? "zero-rated" : null, exemptLabel ? "VAT-exempt" : null].filter(Boolean).join(" / ");
+        const msg = `Receipt prints ${labels} bucket label(s) in totals block, but extraction collapsed everything into the vatable bucket (${vatBase.toFixed(2)} × 1.12 = ${grandTotal.toFixed(2)}). Verify the receipt totals block manually before posting.`;
+        extracted.warnings.push(msg);
+        if (logger) logger.warn("Bucket labels visible on receipt but only vatable bucket extracted.", {
+          grandTotal, vatBase, zeroLabel, exemptLabel
+        });
+      }
+    }
+  }
+
+  // Multi-bucket math check: when at least two buckets are populated, their
+  // sum + VAT must reconcile to grand_total. Single-bucket invoices are handled
+  // by existing grand_total correction cases in fixExtractedAmounts.
   if (populatedBuckets < 2) return;
 
   const componentSum = Math.round((vatBase + vatAmt + zeroRated + exempt) * 100) / 100;
@@ -2033,7 +2062,6 @@ function validateAmountReconciliation(extracted, logger) {
   if (diff <= tolerance) return;
 
   const msg = `Amounts do not reconcile: VATable ${vatBase.toFixed(2)} + VAT ${vatAmt.toFixed(2)} + zero-rated ${zeroRated.toFixed(2)} + exempt ${exempt.toFixed(2)} = ${componentSum.toFixed(2)}, but grand total = ${grandTotal.toFixed(2)} (off by ${diff.toFixed(2)}). Verify the receipt before posting.`;
-  if (!Array.isArray(extracted.warnings)) extracted.warnings = [];
   extracted.warnings.push(msg);
   if (logger) logger.warn("Bill amounts do not reconcile to grand total.", {
     grandTotal, vatBase, vatAmt, zeroRated, exempt, componentSum, diff: Number(diff.toFixed(2))
@@ -2754,7 +2782,7 @@ async function processOneDocument(args) {
     ({ data: extracted, model: geminiModel } = await extractInvoiceWithGemini(config, att, userHint, ocrText, logger));
   }
   fixExtractedAmounts(extracted, ocrText, logger);
-  validateAmountReconciliation(extracted, logger);
+  validateAmountReconciliation(extracted, ocrText, logger);
   let vendor = await findVendor(odoo, companyId, extracted, ocrText);
   if (!vendor.id) {
     const createdVendor = await createVendorIfMissing(odoo, companyId, extracted, ocrText, entityFlags?.country || "");
