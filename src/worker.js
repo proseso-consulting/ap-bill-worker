@@ -2135,7 +2135,7 @@ function vendorNameAccountHint(vendorName, expenseAccounts) {
   return 0;
 }
 
-function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, purchaseJournalId, currencyId, taxMeta, lineAccountIds, vendorCountry, entityFlags, lineAccountMeta) {
+function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, purchaseJournalId, currencyId, taxMeta, lineAccountIds, vendorCountry, entityFlags, lineAccountMeta, logger = null) {
   const inv = extracted?.invoice || {};
   const totals = extracted?.totals || {};
   const grandTotal = Number(totals.grand_total || 0);
@@ -2182,8 +2182,10 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
       const acctMeta = lineAccountMeta?.[i] || {};
 
       let lineTaxIds;
+      let pickerBranch;
       if (hasPerLineVat && lineVatCode) {
         lineTaxIds = pickLineTaxIds(taxMap, item, billGs, vendorCountry, extracted, acctMeta.name, acctMeta.code, acctMeta.accountType);
+        pickerBranch = "per-line";
       } else {
         lineTaxIds = billLevelTaxIds;
         // Refine goods/services discrimination using account when bill-level
@@ -2192,11 +2194,30 @@ function buildBillVals(extracted, vendorId, companyId, taxMap, billLevelTaxIds, 
         // account_type/code-prefix path doesn't need a name to fire.
         const vatableTaxIds = new Set([taxMap.goodsId, taxMap.servicesId, taxMap.genericId].filter(Boolean));
         const hasAccountSignal = !!(acctMeta.name || acctMeta.code || acctMeta.accountType);
+        pickerBranch = "bill-level";
         if (lineTaxIds.length === 1 && vatableTaxIds.has(lineTaxIds[0]) && hasAccountSignal) {
           const refined = pickLineTaxIds(taxMap, { ...item, vat_code: "vatable" }, billGs, vendorCountry, extracted, acctMeta.name, acctMeta.code, acctMeta.accountType);
-          if (refined.length) lineTaxIds = refined;
+          if (refined.length) {
+            lineTaxIds = refined;
+            pickerBranch = "bill-level-refined";
+          }
         }
       }
+      if (logger) logger.info("Line VAT tax picked.", {
+        line: i,
+        branch: pickerBranch,
+        vatCode: lineVatCode,
+        itemGs: String(item.goods_or_services || "").toLowerCase(),
+        billGs,
+        accountCode: acctMeta.code || "",
+        accountName: acctMeta.name || "",
+        accountType: acctMeta.accountType || "",
+        lineTaxIds: [...lineTaxIds],
+        billLevelTaxIds: [...billLevelTaxIds],
+        taxMapGoods: taxMap.goodsId,
+        taxMapServices: taxMap.servicesId,
+        taxMapGeneric: taxMap.genericId
+      });
 
       // Append EWT (withholding tax) if applicable
       const lineGs = String(item.goods_or_services || billGs || "").toLowerCase();
@@ -3002,7 +3023,8 @@ async function processOneDocument(args) {
     lineAccountIds,
     vendorCountry,
     entityFlags,
-    lineAccountMeta
+    lineAccountMeta,
+    logger
   );
   
   // Move document to active AP folder if currently archived
