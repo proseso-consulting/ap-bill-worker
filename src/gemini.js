@@ -596,6 +596,15 @@ async function extractInvoiceWithGemini(config, attachment, userHint = "", ocrTe
   const data = safeJsonParse(result.text, {});
   const candidate = data?.candidates?.[0];
   const finishReason = candidate?.finishReason;
+  const usage = data?.usageMetadata || {};
+  if (logger) logger.info("Gemini call usage.", {
+    call: "extract",
+    model: result.model,
+    finishReason: finishReason || "",
+    promptTokenCount: Number(usage.promptTokenCount || 0),
+    candidatesTokenCount: Number(usage.candidatesTokenCount || 0),
+    totalTokenCount: Number(usage.totalTokenCount || 0)
+  });
   if (finishReason && finishReason !== "STOP" && logger) {
     logger.warn("Gemini extraction finishReason was not STOP — JSON may be truncated.", {
       model: result.model,
@@ -853,6 +862,15 @@ RULES (MANDATORY - follow ALL):
   const data = safeJsonParse(result.text, {});
   const candidate = data?.candidates?.[0];
   const finishReason = candidate?.finishReason;
+  const usage = data?.usageMetadata || {};
+  if (logger) logger.info("Gemini call usage.", {
+    call: "assign",
+    model: result.model,
+    finishReason: finishReason || "",
+    promptTokenCount: Number(usage.promptTokenCount || 0),
+    candidatesTokenCount: Number(usage.candidatesTokenCount || 0),
+    totalTokenCount: Number(usage.totalTokenCount || 0)
+  });
   if (finishReason && finishReason !== "STOP" && logger) {
     logger.warn("Gemini account-assignment finishReason was not STOP — JSON may be truncated.", {
       model: result.model,
@@ -903,6 +921,15 @@ If the company is not well-known or search returns no useful results, say "No in
     const data = safeJsonParse(result.text, null);
     const candidate = data?.candidates?.[0];
     const finishReason = candidate?.finishReason;
+    const usage = data?.usageMetadata || {};
+    if (logger) logger.info("Gemini call usage.", {
+      call: "research",
+      model: result.model,
+      finishReason: finishReason || "",
+      promptTokenCount: Number(usage.promptTokenCount || 0),
+      candidatesTokenCount: Number(usage.candidatesTokenCount || 0),
+      totalTokenCount: Number(usage.totalTokenCount || 0)
+    });
     if (finishReason && finishReason !== "STOP" && logger) {
       logger.warn("Gemini vendor-research finishReason was not STOP — output may be truncated.", {
         model: result.model,
