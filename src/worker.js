@@ -79,7 +79,11 @@ async function pickVatTaxesForCompany(odoo, companyId) {
   const has = (t, re) => re.test(text(t));
   const scope = (t) => norm(t.tax_scope || "");
 
-  const isWithholding = (t) => has(t, /fwvat|ewvat|withhold|withholding|wht|designated|ds\b/);
+  // \bds\b requires word boundaries on BOTH sides so it matches the standalone
+  // "DS" suffix (e.g. "12% FWVAT DS") but NOT the trailing "ds" in "goods" —
+  // which previously excluded the goods VAT tax from candidates and silently
+  // collapsed taxMap.goodsId/servicesId/genericId to the same services tax id.
+  const isWithholding = (t) => has(t, /fwvat|ewvat|withhold|withholding|wht|designated|\bds\b/);
   const isCapital = (t) => has(t, /capital\s*goods|capital\s*asset|\bcapital\b.*\bgoods\b|\b12%\s*c\b|\b12%c\b/);
   const isImport = (t) => has(t, /\bimport\b|\bimportation\b|\b12%\s*i\b/);
   const isNcr = (t) => has(t, /\bncr\b|non[-\s]?credit|not directly attribut/);
