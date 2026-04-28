@@ -625,11 +625,53 @@ function chooseBestNonAtpVendor(vendorCandidates, ocrText) {
   return filtered[0] || null;
 }
 
+// Corporate suffix patterns identifying a legal entity (vs. a retail brand).
+// Used to promote a candidate like "Philippine Seven Corporation" over a header
+// brand like "7-ELEVEN" when Gemini latches onto the visually-prominent brand.
+const CORPORATE_SUFFIX_RE = /\b(corporation|corp\.?|incorporated|inc\.?|holdings?|company|co\.?|ltd\.?|limited|llc|plc|ag|sa|gmbh|pty)\b/i;
+
+function looksLikeRetailBrand(name) {
+  const n = String(name || "").trim();
+  if (!n) return false;
+  if (CORPORATE_SUFFIX_RE.test(n)) return false;
+  // Single token brand (e.g. "JOLLIBEE", "7-ELEVEN", "S&R").
+  const tokens = n.split(/\s+/).filter(Boolean);
+  if (tokens.length === 1) return true;
+  // Short all-caps marketing phrase with no corporate suffix.
+  if (tokens.length <= 3 && n === n.toUpperCase()) return true;
+  return false;
+}
+
 function pickVendorFromExtraction(extracted, ocrText) {
   const v = extracted?.vendor || {};
   const primaryName = String(v.name || "").trim();
   const primaryBad = String(v.source || "") === "atp_printer_box" || looksLikeAtpPrinterVendor(primaryName, ocrText);
-  if (primaryName && !primaryBad) return { name: primaryName, confidence: Number(v.confidence || 0), source: v.source || "unknown" };
+
+  if (primaryName && !primaryBad) {
+    // Brand-vs-legal-entity guard: if the primary name looks like a retail brand
+    // (no corporate suffix), but vendor_candidates contains a candidate with one,
+    // prefer the corporate candidate. The brand is what Gemini saw at the top of
+    // the receipt; the legal entity is the actual VAT-registered taxpayer.
+    if (looksLikeRetailBrand(primaryName)) {
+      const candidates = Array.isArray(extracted?.vendor_candidates) ? extracted.vendor_candidates : [];
+      const corp = candidates.find((cand) => {
+        const cn = String(cand?.name || "").trim();
+        return cn
+          && CORPORATE_SUFFIX_RE.test(cn)
+          && String(cand?.source || "") !== "atp_printer_box"
+          && !looksLikeAtpPrinterVendor(cn, ocrText);
+      });
+      if (corp) {
+        return {
+          name: String(corp.name).trim(),
+          confidence: Number(corp.confidence || v.confidence || 0),
+          source: corp.source || v.source || "unknown"
+        };
+      }
+    }
+    return { name: primaryName, confidence: Number(v.confidence || 0), source: v.source || "unknown" };
+  }
+
   const alt = chooseBestNonAtpVendor(extracted?.vendor_candidates, ocrText);
   if (alt) return { name: String(alt.name || "").trim(), confidence: Number(alt.confidence || 0), source: alt.source || "unknown" };
   return { name: "", confidence: 0, source: "unknown" };

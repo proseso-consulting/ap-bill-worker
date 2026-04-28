@@ -302,6 +302,20 @@ VENDOR IDENTITY — SAME BRAND, DIFFERENT LEGAL ENTITIES (CRITICAL):
 - If the document shows "Pte. Ltd." (Singapore) in one place and "Inc." (Philippines) in another, and the bank details or footer show the Philippine entity, the vendor is the Philippine entity (Inc.), not the Singapore one (Pte. Ltd.), unless the invoice is clearly issued by the Singapore entity.
 - vendor_details.address must be the address of the ISSUER (the vendor), not the client/customer. The client is who is being billed; the vendor is who sent the invoice and receives payment.
 
+RECEIPT HEADER vs LEGAL ENTITY (CRITICAL FOR PH RETAIL/SUPERMARKET RECEIPTS):
+- Many PH retail receipts show a brand/store name as a large header at the top (e.g. "7-ELEVEN", "JOLLIBEE", "S&R", "MERCURY DRUG", "ROBINSONS SUPERMARKET", "THE MARKETPLACE") followed below by the actual legal entity that owns and operates the store (e.g. "Philippine Seven Corporation", "Jollibee Foods Corporation", "Robinsons Supermarket Corporation").
+- The legal entity is the VAT-registered taxpayer and the correct value for vendor.name. The brand is the trade_name. NEVER use the brand alone as vendor.name when the legal entity is visible anywhere on the receipt.
+- Structural cues that identify the legal entity:
+  - Phrases like "Owned & Operated by: <Company>", "Owned by: <Company>", "Operated by: <Company>", "<Company> - Owned & Operated by:".
+  - The corporate name printed directly above or below the VAT-registered TIN line ("VATREGTIN #...", "VAT Reg TIN: ...") and the issuer address block.
+  - Any name with a corporate suffix: "Corporation", "Corp.", "Inc.", "Incorporated", "Holdings", "Company", "Co.", "Ltd.", "Limited".
+- Concrete mappings on PH receipts:
+  - "7-ELEVEN" header + "Philippine Seven Corporation" body → vendor.name = "Philippine Seven Corporation", trade_name = "7-ELEVEN"
+  - "JOLLIBEE" header + "Jollibee Foods Corporation" body → vendor.name = "Jollibee Foods Corporation", trade_name = "JOLLIBEE"
+  - "ROBINSONS SUPERMARKET" / "THE MARKETPLACE" header + "Robinsons Supermarket Corporation" body → vendor.name = "Robinsons Supermarket Corporation", trade_name set to whichever brand is on the header
+  - "MERCURY DRUG" header + "Mercury Drug Corporation" body → vendor.name = "Mercury Drug Corporation", trade_name = "MERCURY DRUG"
+- Always include the legal entity in vendor_candidates with a high confidence even if the most prominent printed text is the brand. The brand alone (no corporate suffix, all-caps marketing text) should be a low-confidence candidate, never the chosen vendor.
+
 OUTPUT REQUIREMENTS:
 - vendor.source must be one of: header|body|atp_printer_box|unknown
 - vendor_candidates should include up to 5 plausible vendors with source + confidence.
